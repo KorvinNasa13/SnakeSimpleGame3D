@@ -1,0 +1,24 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 42c887b071819ff48bddc8ec41dae87d, type: 3}
+  m_Name: Snake1Data
+  m_EditorClassIdentifier: 
+  snakeID: snake_default
+  snakeName: Snake1
+  startLength: 3
+  baseSpeed: 2
+  boostMultiplier: 1.5
+  maxLength: 10
+  speedIncrPerFood: 0.2
+  headPrefab: {fileID: 4451161360931409011, guid: 6250698869428f5498b33eb388b64965, type: 3}
+  bodyPrefab: {fileID: 4451161360931409011, guid: 70963c95cfd6d0f479a2e800f7e806f8, type: 3}
+  useSnakeAI: 1
