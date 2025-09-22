@@ -10,8 +10,8 @@ A prototype project where I'm experimenting with creating a **"3D Snake"** game 
 
 ## ✨ About the Project
 
-I'm using different approaches and patterns to demonstrate my skills in C#. 
-During development, I've often used AI as a mentor for complex explanations.
+Different approaches and patterns are used to demonstrate skills in C#. 
+During development, AI has often served as a mentor, helping to understand complex concepts.
 
 > **Status:** Work in progress  
 > The project is still being developed, so there may be unused elements.  
