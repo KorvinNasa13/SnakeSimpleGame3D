@@ -26,5 +26,5 @@ During development, AI has often served as a mentor, helping to understand compl
 - Multiple food types (expandable)  
 - Modular, pattern-based C# architecture
 - Simple Snake AI
-- (Planned) advanced Snake AI
+- (Planned) Advanced Snake AI
 - (Planned) Improved UI, power-ups, and more!
