@@ -24,6 +24,7 @@ During development, AI has often served as a mentor, helping to understand compl
 - 3D grid-based Snake movement  
 - Customizable game settings via ScriptableObjects  
 - Multiple food types (expandable)  
-- Modular, pattern-based C# architecture  
-- (Planned) AI Snake and advanced features  
+- Modular, pattern-based C# architecture
+- Simple Snake AI
+- (Planned) advanced Snake AI
 - (Planned) Improved UI, power-ups, and more!
