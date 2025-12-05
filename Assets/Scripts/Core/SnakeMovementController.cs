@@ -426,7 +426,6 @@ namespace SnakeGame.Core
 
             // Visual Update
             UpdateVisualsEfficiently(newHeadPos, tailRemoved);
-            CheckFood(newHeadPos);
             OnMove?.Invoke(newHeadPos);
         }
         
