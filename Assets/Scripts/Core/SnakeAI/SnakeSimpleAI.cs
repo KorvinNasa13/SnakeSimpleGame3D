@@ -4,262 +4,157 @@ using SnakeGame.Core;
 
 namespace SnakeGame.AI
 {
-    /// <summary>
-    /// Simple AI that seeks food and avoids obstacles
-    /// </summary>
     public class SnakeSimpleAI : MonoBehaviour, IControlledSnakeAI
     {
-        [SerializeField] 
-        private GridManager gridManager;
+        [Header("Settings")]
+        [SerializeField] private bool lookAheadForTraps = true;
         
-        [SerializeField] 
-        private FoodManager foodManager;
-        
-        [SerializeField] 
-        private SnakeMovementController snake;
-        
-        private bool _missingDependenciesLogged;
-        
-        private void Awake()
-        {
-            if (!snake)
-            {
-                TryGetComponent(out snake);
-            }
-        }
-        
+        [Header("Debug Visuals")]
+        [SerializeField] private bool showDebugLines = true;
+        [SerializeField] private Color foodLineColor = Color.red;
+        [SerializeField] private Color moveLineColor = Color.green;
+
+        // Cache dependencies
+        private GridManager _grid;
+        private FoodManager _food;
+        private SnakeMovementController _controller;
+
+        // Debug state
+        private GridPosition? _lastTargetFood;
+        private GridPosition _lastMoveDir;
+
         public void Configure(GridManager grid, FoodManager food, SnakeMovementController controller)
         {
-            gridManager = grid;
-            foodManager = food;
-            snake = controller ? controller : snake;
-
-            var ready = ValidateDependencies(true);
-            enabled = ready;
+            _grid = grid;
+            _food = food;
+            _controller = controller;
         }
 
-        private bool ValidateDependencies(bool logErrors)
+        private void Start()
         {
-            if (!gridManager)
-            {
-                gridManager = FindFirstObjectByType<GridManager>();
-            }
-
-            if (!foodManager)
-            {
-                foodManager = FindFirstObjectByType<FoodManager>();
-            }
-
-            if (!gridManager || !foodManager)
-            {
-                if (logErrors && !_missingDependenciesLogged)
-                {
-                    Debug.LogError("[SimpleSnakeAI] Missing required components!");
-                    _missingDependenciesLogged = true;
-                }
-                return false;
-            }
-
-            if (!snake)
-            {
-                TryGetComponent(out snake);
-            }
-
-            if (!snake)
-            {
-                if (logErrors && !_missingDependenciesLogged)
-                {
-                    Debug.LogError("[SimpleSnakeAI] Missing SnakeMovementController reference!");
-                    _missingDependenciesLogged = true;
-                }
-                return false;
-            }
-
-            _missingDependenciesLogged = false;
-            return true;
+            if (!_controller) TryGetComponent(out _controller);
+            if (!_grid) _grid = FindFirstObjectByType<GridManager>();
+            if (!_food) _food = FindFirstObjectByType<FoodManager>();
         }
-        
-        /// <summary>
-        /// Get next move direction for the snake
-        /// </summary>
-        public GridPosition GetNextMove(SnakeMovementController controller)
+
+        public GridPosition GetNextMove(SnakeMovementController snake)
         {
-            if (!ValidateDependencies(true))
-            {
-                enabled = false;
-                return GridPosition.Zero;
-            }
-            
-            // Get current head position
-            var head = controller.HeadPosition;
-            
-            // Get all safe directions
-            var safeDirections = GetSafeDirections(head, controller);
-            
-            if (safeDirections.Count == 0)
-            {
-                Debug.LogWarning($"[SimpleSnakeAI] No safe moves for {controller.SnakeId}!");
-                return GridPosition.Zero; // Snake will die
-            }
-            
-            // Find nearest food
-            var targetFood = foodManager.FindNearestFood(head);
-            
-            if (targetFood.HasValue)
-            {
-                // Move toward food
-                return GetBestDirectionToTarget(head, targetFood.Value, safeDirections, controller);
-            }
-            else
-            {
-                // No food, pick safest direction (most open space)
-                return GetSafestDirection(head, safeDirections, controller);
-            }
-        }
-        
-        /// <summary>
-        /// Get all directions that won't cause immediate collision
-        /// </summary>
-        private List<GridPosition> GetSafeDirections(GridPosition head, SnakeMovementController controller)
-        {
-            var safe = new List<GridPosition>();
-            
-            // Check all 6 directions (or 4 for 2D)
+            if (!_grid || !snake) return GridPosition.Zero;
+
+            var head = snake.HeadPosition;
+            var currentDir = snake.CurrentDirection;
+
+            // 1. Find Food
+            var foodTarget = _food ? _food.FindNearestFood(head) : null;
+            _lastTargetFood = foodTarget; // Save for Gizmos
+
+            // 2. Evaluate all 6 directions
+            var bestDir = currentDir;
+            var bestScore = int.MinValue;
+
             var directions = GridPosition.Directions3D;
-            
+
             foreach (var dir in directions)
             {
+                if (IsOpposite(dir, currentDir)) continue;
+
                 var nextPos = head + dir;
-                
-                if (IsSafePosition(nextPos, controller))
+                var score = 0;
+
+                // A. Safety Check (Occupied check handles Food correctly now)
+                if (!IsSafe(nextPos, snake))
                 {
-                    safe.Add(dir);
+                    score = -10000;
+                }
+                else
+                {
+                    // B. Food Incentive
+                    if (foodTarget.HasValue)
+                    {
+                        var distOld = head.ManhattanDistance(foodTarget.Value);
+                        var distNew = nextPos.ManhattanDistance(foodTarget.Value);
+
+                        if (distNew < distOld) score += 50;
+                        else score -= 10;
+                    }
+
+                    // C. Trap Avoidance
+                    if (lookAheadForTraps)
+                    {
+                        var openExits = CountOpenExits(nextPos, snake);
+                        if (openExits == 0) score -= 2000;
+                        else score += openExits * 5;
+                    }
+
+                    if (dir.Equals(currentDir)) score += 5;
+                }
+
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestDir = dir;
                 }
             }
             
-            return safe;
+            _lastMoveDir = bestDir; // Save for Gizmos
+            return bestDir;
         }
+
+        // --- Helpers ---
         
-        /// <summary>
-        /// Check if position is safe to move to
-        /// </summary>
-        private bool IsSafePosition(GridPosition pos, SnakeMovementController controller)
+        private bool IsSafe(GridPosition pos, SnakeMovementController snake)
         {
-            // Check grid boundaries
-            if (!gridManager.IsValidPosition(pos))
-                return false;
-            
-            // Check self collision (ignore tail as it will move)
-            var body = controller.Body;
-            for (int i = 0; i < body.Count - 1; i++)
+            if (!_grid.IsValidPosition(pos)) return false;
+
+            if (_grid.IsOccupied(pos))
             {
-                if (body[i].Equals(pos))
-                    return false;
-            }
-            
-            // Check other snakes
-            if (gridManager.IsOccupiedByOtherSnake(pos, controller.SnakeId))
+                // CRITICAL: Food is "Occupied" but Safe
+                if (_food != null && _food.IsFoodAt(pos)) return true;
                 return false;
-            
+            }
             return true;
         }
-        
-        /// <summary>
-        /// Get best direction to move toward target
-        /// </summary>
-        private GridPosition GetBestDirectionToTarget(GridPosition head, GridPosition target, 
-            List<GridPosition> safeDirections, SnakeMovementController controller)
+
+        private int CountOpenExits(GridPosition fromPos, SnakeMovementController snake)
         {
-            GridPosition bestDirection = safeDirections[0];
-            int bestDistance = int.MaxValue;
-            int bestSafety = -1;
-            
-            foreach (var dir in safeDirections)
-            {
-                var nextPos = head + dir;
-                int distance = nextPos.ManhattanDistance(target);
-                int safety = CalculateSafetyScore(nextPos, controller);
-                
-                // Prioritize distance to food, but consider safety as tiebreaker
-                if (distance < bestDistance || (distance == bestDistance && safety > bestSafety))
-                {
-                    bestDistance = distance;
-                    bestSafety = safety;
-                    bestDirection = dir;
-                }
-            }
-            
-            return bestDirection;
-        }
-        
-        /// <summary>
-        /// Get the safest direction when no food is available
-        /// </summary>
-        private GridPosition GetSafestDirection(GridPosition head, List<GridPosition> safeDirections, 
-            SnakeMovementController controller)
-        {
-            GridPosition bestDirection = safeDirections[0];
-            int bestSafety = -1;
-            
-            foreach (var dir in safeDirections)
-            {
-                var nextPos = head + dir;
-                int safety = CalculateSafetyScore(nextPos, controller);
-                
-                if (safety > bestSafety)
-                {
-                    bestSafety = safety;
-                    bestDirection = dir;
-                }
-            }
-            
-            return bestDirection;
-        }
-        
-        /// <summary>
-        /// Calculate how safe a position is (higher = safer)
-        /// </summary>
-        private int CalculateSafetyScore(GridPosition pos, SnakeMovementController controller)
-        {
-            int safety = 0;
-            
-            // Count available moves from this position
+            var exits = 0;
             foreach (var dir in GridPosition.Directions3D)
             {
-                var nextPos = pos + dir;
-                if (IsSafePosition(nextPos, controller))
-                {
-                    safety++;
-                }
+                if (IsSafe(fromPos + dir, snake)) exits++;
             }
-            
-            // Bonus for center positions (away from walls)
-            int centerDistance = Mathf.Abs(pos.X - gridManager.GridSize / 2) +
-                                Mathf.Abs(pos.Y - gridManager.GridSize / 2) +
-                                Mathf.Abs(pos.Z - gridManager.GridSize / 2);
-            
-            safety += (gridManager.GridSize * 3 - centerDistance) / 10;
-            
-            return safety;
+            return exits;
+        }
+
+        private bool IsOpposite(GridPosition a, GridPosition b)
+        {
+            return a.X == -b.X && a.Y == -b.Y && a.Z == -b.Z;
         }
         
-        /// <summary>
-        /// Debug visualization
-        /// </summary>
+        // --- Debug Visualization ---
+
         private void OnDrawGizmos()
         {
-            if (!Application.isPlaying || !snake || !gridManager)
-                return;
-            
-            // Draw line to target food
-            var targetFood = foodManager.FindNearestFood(snake.HeadPosition);
-            if (targetFood.HasValue)
+            if (!showDebugLines || !_controller || !_grid) return;
+            if (!Application.isPlaying) return;
+
+            Vector3 headWorld = _grid.GridToWorld(_controller.HeadPosition);
+
+            // 1. Draw Line to Target Food
+            if (_lastTargetFood.HasValue)
             {
-                Gizmos.color = Color.yellow;
-                Gizmos.DrawLine(
-                    gridManager.GridToWorld(snake.HeadPosition),
-                    gridManager.GridToWorld(targetFood.Value)
-                );
+                Gizmos.color = foodLineColor;
+                Vector3 foodWorld = _grid.GridToWorld(_lastTargetFood.Value);
+                Gizmos.DrawLine(headWorld, foodWorld);
+                Gizmos.DrawWireSphere(foodWorld, _grid.CellSize * 0.3f);
+            }
+
+            // 2. Draw Intended Move Direction
+            if (_lastMoveDir != GridPosition.Zero)
+            {
+                Gizmos.color = moveLineColor;
+                Vector3 targetWorld = _grid.GridToWorld(_controller.HeadPosition + _lastMoveDir);
+                Gizmos.DrawLine(headWorld, targetWorld);
+                Gizmos.DrawSphere(targetWorld, _grid.CellSize * 0.2f);
             }
         }
     }

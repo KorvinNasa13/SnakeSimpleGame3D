@@ -1,7 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
+using System.Linq; // Used only for initial config (rarely)
 using UnityEngine;
 using SnakeGame.Configuration;
 using SnakeGame.Data;
@@ -10,322 +10,426 @@ namespace SnakeGame.Core
 {
     public class FoodManager : MonoBehaviour
     {
+        // Simple class to track active food data
         [Serializable]
         private class ActiveFood
         {
             public FoodTypeSo Type;
             public float SpawnTime;
             public GameObject Visual;
-
-            public ActiveFood(FoodTypeSo type, float t)
-            {
-                Type = type;
-                SpawnTime = t;
-            }
+            public GridPosition Position;
         }
-        
-        [Header("Debug")] 
-        [SerializeField] 
+
+        [Header("Debug")]
+        [SerializeField]
         private bool debugForceZLayer = true;
-        [SerializeField] 
-        private int debugZLayer = 0; 
+
+        [SerializeField]
+        private int debugZLayer = 0;
+
+        [Header("Audio")]
+        [SerializeField]
+        private AudioSource sfxSource;
 
         private GridManager _grid;
-        private GameSettingsSo settings;
-        private bool _ready;
+        private GameSettingsSo _settings;
+        private bool _isInitialized;
 
-        private readonly Dictionary<GridPosition, ActiveFood> _active = new();
-        private readonly Dictionary<FoodTypeSo, float> _cooldownUntil = new();
-        private float _nextNaturalSpawn;
+        // Main storage: Dictionary for O(1) lookups by position
+        private readonly Dictionary<GridPosition, ActiveFood> _activeFoods = new();
 
-        private readonly List<GridPosition> _foodPositionsCache = new();
-        private bool _cacheIsDirty = true;
-        
+        // Secondary storage: List for allocation-free iteration (FindNearest)
+        private readonly List<ActiveFood> _activeFoodList = new();
+
+        // Object Pool: Maps Prefab -> Stack of inactive instances
+        private readonly Dictionary<GameObject, Stack<GameObject>> _visualPool = new();
+
+        // Track cooldowns per food type
+        private readonly Dictionary<FoodTypeSo, float> _cooldowns = new();
+
+        private float _nextNaturalSpawnTime;
+
+        private void Awake()
+        {
+            if (!sfxSource)
+            {
+                // Create a dedicated audio source if none assigned
+                sfxSource = gameObject.AddComponent<AudioSource>();
+            }
+        }
+
         public void Init(GridManager grid, GameSettingsSo cfg)
         {
             _grid = grid;
-            settings = cfg;
-            _ready = _grid && settings;
+            _settings = cfg;
+            _isInitialized = _grid && _settings;
         }
 
         private void Start()
         {
-            if (!_ready)
+            if (!_isInitialized)
             {
-                Debug.LogError("[FoodManager] Not initialised - call Init(grid, settings) before Start()");
+                Debug.LogError("[FoodManager] Not initialized. Call Init() first.");
                 enabled = false;
+
                 return;
             }
 
-            // Initial fill
-            var initial = Mathf.Max(0, settings.MaxFoodCount);
-            for (var i = 0; i < initial; i++)
+            // Spawn initial batch
+            var initialCount = Mathf.Max(0, _settings.MaxFoodCount);
+
+            for (var i = 0; i < initialCount; i++)
+            {
                 ForceSpawnFood();
+            }
 
             ScheduleNextNaturalSpawn();
-
-            Debug.Log($"[FoodManager] Ready. Max={settings.MaxFoodCount}, " +
-                      $"Types={settings.AvailableFoodTypes?.Length ?? 0}, " +
-                      $"Intervals=[{settings.FoodSpawnIntervalMin}; {settings.FoodSpawnIntervalMax}]");
-
             StartCoroutine(FoodLoop());
         }
 
-        /// <summary>
-        /// Check if there's food at specific position
-        /// </summary>
+        // ----------------------------- Public API -----------------------------
+
         public bool IsFoodAt(in GridPosition p)
         {
-            return _active.ContainsKey(p);
+            return _activeFoods.ContainsKey(p);
         }
-        
+
         /// <summary>
-        /// Find nearest food to a given position (optimized)
+        /// Optimized nearest neighbor search (No GC allocation).
         /// </summary>
         public GridPosition? FindNearestFood(GridPosition from)
         {
-            if (_active.Count == 0) return null;
-
-            GridPosition? nearest = null;
-            var minDistance = int.MaxValue;
-
-            // Faster than grid scan
-            foreach (var kvp in _active)
+            if (_activeFoodList.Count == 0)
             {
-                var distance = from.ManhattanDistance(kvp.Key);
-                if (distance < minDistance)
+                return null;
+            }
+
+            ActiveFood nearest = null;
+            var minDst = int.MaxValue;
+
+            // Iterate over List instead of Dictionary to avoid enumerator allocation
+            for (var i = 0; i < _activeFoodList.Count; i++)
+            {
+                var food = _activeFoodList[i];
+                var dst = from.ManhattanDistance(food.Position);
+
+                if (dst < minDst)
                 {
-                    minDistance = distance;
-                    nearest = kvp.Key;
+                    minDst = dst;
+                    nearest = food;
                 }
             }
 
-            return nearest;
+            return nearest?.Position;
         }
 
-        /// <summary>
-        /// Consume food at position and return its type
-        /// </summary>
         public FoodTypeSo EatFood(in GridPosition p)
         {
-            if (!_active.TryGetValue(p, out var food)) return null;
-            DespawnFood(p, food.Type);
+            if (!_activeFoods.TryGetValue(p, out var food))
+            {
+                return null;
+            }
+
+            DespawnFood(food);
+
             return food.Type;
         }
-        
+
+        // ----------------------------- Loop -----------------------------
+
         private IEnumerator FoodLoop()
         {
-            var wait = new WaitForEndOfFrame();
-            while (isActiveAndEnabled)
+            var wait = new WaitForSeconds(0.5f); // Check every 0.5s instead of every frame
+
+            while (enabled)
             {
-                TickLifetimeDespawn();
-                if (Time.time >= _nextNaturalSpawn && _active.Count < settings.MaxFoodCount)
+                yield return wait;
+
+                // 1. Despawn old food
+                CheckLifetimeDespawn();
+
+                // 2. Spawn new food
+                if (Time.time >= _nextNaturalSpawnTime && _activeFoods.Count < _settings.MaxFoodCount)
                 {
                     TrySpawnFood();
                     ScheduleNextNaturalSpawn();
                 }
-
-                yield return wait;
             }
         }
 
-        // ======================== Cache Management ========================
-
-        private void RefreshCache()
-        {
-            _foodPositionsCache.Clear();
-            _foodPositionsCache.AddRange(_active.Keys);
-            _cacheIsDirty = false;
-        }
-
-        private void MarkCacheDirty()
-        {
-            _cacheIsDirty = true;
-        }
-
-        // ======================== Spawning ========================
+        // ----------------------------- Spawning Logic -----------------------------
 
         private void TrySpawnFood()
         {
             var type = PickRandomFoodType();
-            if (!type) return;
 
-            var pos = GetRandomFreeCellAvoidingActive();
-            SpawnFoodInternal(pos, type);
+            if (!type)
+            {
+                return;
+            }
+
+            var pos = GetRandomFreePosition();
+
+            if (pos.HasValue)
+            {
+                SpawnFoodInternal(pos.Value, type);
+            }
         }
 
         private void ForceSpawnFood()
         {
-            var pool = settings.AvailableFoodTypes?
-                .Where(t => t && t.CanSpawnNaturally).ToArray();
-            if (pool == null || pool.Length == 0) return;
+            // Simple random pick from available types
+            if (_settings.AvailableFoodTypes == null || _settings.AvailableFoodTypes.Length == 0)
+            {
+                return;
+            }
+
+            var pool = _settings.AvailableFoodTypes.Where(t => t && t.CanSpawnNaturally).ToArray();
+
+            if (pool.Length == 0)
+            {
+                return;
+            }
 
             var type = pool[UnityEngine.Random.Range(0, pool.Length)];
-            var pos = GetRandomFreeCellAvoidingActive();
-            SpawnFoodInternal(pos, type);
+            var pos = GetRandomFreePosition();
+
+            if (pos.HasValue)
+            {
+                SpawnFoodInternal(pos.Value, type);
+            }
         }
 
-        private GridPosition GetRandomFreeCellAvoidingActive(int maxTries = 200)
+        private GridPosition? GetRandomFreePosition()
         {
-            for (var i = 0; i < maxTries; i++)
+            for (var i = 0; i < 20; i++)
             {
-                var p = _grid.GetRandomEmptyPosition();
-                if (debugForceZLayer)
-                    p = new GridPosition(p.X, p.Y, Mathf.Clamp(debugZLayer, 0, _grid.GridSize - 1));
-                if (!_active.ContainsKey(p)) return p;
+                try
+                {
+                    var p = _grid.GetRandomEmptyPosition();
+
+                    if (debugForceZLayer)
+                    {
+                        p = new GridPosition(p.X, p.Y, Mathf.Clamp(debugZLayer, 0, _grid.GridSize - 1));
+                    }
+
+                    if (!_activeFoods.ContainsKey(p))
+                    {
+                        return p;
+                    }
+                } catch (InvalidOperationException)
+                {
+                    return null;
+                }
             }
 
-            // Fallback: ensure we return something not already used
-            GridPosition probe;
-            do
-            {
-                probe = _grid.GetRandomEmptyPosition();
-                if (debugForceZLayer)
-                    probe = new GridPosition(probe.X, probe.Y, Mathf.Clamp(debugZLayer, 0, _grid.GridSize - 1));
-            } while (_active.ContainsKey(probe));
-
-            return probe;
+            return null;
         }
 
-        private void SpawnFoodInternal(in GridPosition pos, FoodTypeSo type)
+        private void SpawnFoodInternal(GridPosition pos, FoodTypeSo type)
         {
-            if (_active.ContainsKey(pos)) return;
+            if (_activeFoods.ContainsKey(pos))
+            {
+                return;
+            }
 
-            _active.Add(pos, new ActiveFood(type, Time.time));
-            MarkCacheDirty();
-            _cooldownUntil[type] = Time.time + Mathf.Max(0f, type.SpawnCooldown);
-            
+            // 1. Get Visual from Pool
+            var visual = GetPooledVisual(type.Prefab, pos);
+
+            // 2. Create Data
+            var activeFood = new ActiveFood
+            {
+                Type = type,
+                SpawnTime = Time.time,
+                Visual = visual,
+                Position = pos
+            };
+
+            // 3. Register
+            _activeFoods.Add(pos, activeFood);
+            _activeFoodList.Add(activeFood); // Sync list
+            _cooldowns[type] = Time.time + type.SpawnCooldown;
+
+            // 4. Update Grid
+            // Ideally, we shouldn't use "SetFood" if it changes cell state to blocked.
+            // But if your game logic requires the cell to be marked as Food:
             _grid.PeekCell(pos)?.SetFood(type.FoodId);
 
-            // Create visual
-            GameObject visual = null;
-            if (type.Prefab)
+            // 5. Effects
+            if (type.SpawnSound && sfxSource)
             {
-                visual = Instantiate(type.Prefab, _grid.GridToWorld(pos), Quaternion.identity, transform);
-            }
-            else
-            {
-                // Fallback debug visual
-                visual = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                visual.transform.SetParent(transform, false);
-                visual.transform.position = _grid.GridToWorld(pos);
-                visual.transform.localScale = Vector3.one * Mathf.Max(0.25f, _grid.CellSize * 0.5f);
-                visual.name = "DEBUG_FoodSphere";
+                sfxSource.PlayOneShot(type.SpawnSound);
             }
 
-            // Ensure visibility
-            if (visual && !visual.GetComponentInChildren<Renderer>())
-            {
-                var s = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                s.name = "DEBUG_FoodSphereChild";
-                s.transform.SetParent(visual.transform, false);
-                s.transform.localScale = Vector3.one * Mathf.Max(0.2f, _grid.CellSize * 0.4f);
-            }
-
-            _active[pos].Visual = visual;
-
-            // Effects
-            if (type.SpawnSound)
-                AudioSource.PlayClipAtPoint(type.SpawnSound, _grid.GridToWorld(pos));
             if (type.SpawnParticleEffect)
+            {
                 Instantiate(type.SpawnParticleEffect, _grid.GridToWorld(pos), Quaternion.identity);
+            }
 
-            Debug.Log($"[FoodManager] Spawned '{type.FoodName}' at {pos}");
             OnFoodSpawned?.Invoke(pos, type);
         }
 
-        private void DespawnFood(in GridPosition pos, FoodTypeSo type)
+        private void DespawnFood(ActiveFood food)
         {
-            if (!_active.Remove(pos, out var af)) return;
+            // 1. Unregister
+            _activeFoods.Remove(food.Position);
+            _activeFoodList.Remove(food);
 
-            MarkCacheDirty(); // Mark cache for refresh
+            // 2. Return Visual to Pool
+            ReturnPooledVisual(food.Visual, food.Type.Prefab);
 
-            if (af.Visual) Destroy(af.Visual);
-            _grid.ClearCell(pos);
+            // 3. Update Grid
+            _grid.ClearCell(food.Position);
 
-            // Effects
-            if (type.EatSound)
-                AudioSource.PlayClipAtPoint(type.EatSound, _grid.GridToWorld(pos));
-            if (type.EatParticleEffect)
-                Instantiate(type.EatParticleEffect, _grid.GridToWorld(pos), Quaternion.identity);
-
-            OnFoodRemoved?.Invoke(pos, type);
-            Debug.Log($"[FoodManager] Despawn '{type.FoodName}' at {pos}");
-        }
-
-        private void TickLifetimeDespawn()
-        {
-            if (_active.Count == 0) return;
-
-            var toRemove = ListPool<GridPosition>.Get();
-            foreach (var kv in _active)
+            // 4. Effects
+            if (food.Type.EatSound && sfxSource)
             {
-                var life = kv.Value.Type.Lifetime;
-                if (life > 0f && Time.time - kv.Value.SpawnTime >= life)
-                    toRemove.Add(kv.Key);
+                sfxSource.PlayOneShot(food.Type.EatSound);
             }
 
-            foreach (var p in toRemove)
-                DespawnFood(p, _active[p].Type);
-            ListPool<GridPosition>.Release(toRemove);
+            if (food.Type.EatParticleEffect)
+            {
+                Instantiate(food.Type.EatParticleEffect, _grid.GridToWorld(food.Position), Quaternion.identity);
+            }
+
+            OnFoodRemoved?.Invoke(food.Position, food.Type);
         }
+
+        private void CheckLifetimeDespawn()
+        {
+            if (_activeFoodList.Count == 0)
+            {
+                return;
+            }
+
+            // Iterate backwards to safely remove
+            for (var i = _activeFoodList.Count - 1; i >= 0; i--)
+            {
+                var food = _activeFoodList[i];
+
+                if (food.Type.Lifetime > 0 && Time.time - food.SpawnTime > food.Type.Lifetime)
+                {
+                    DespawnFood(food);
+                }
+            }
+        }
+
+        // ----------------------------- Object Pooling -----------------------------
+        private GameObject GetPooledVisual(GameObject prefab, GridPosition pos)
+        {
+            GameObject instance;
+
+            // Ensure pool exists
+            if (!_visualPool.TryGetValue(prefab, out var stack))
+            {
+                stack = new Stack<GameObject>();
+                _visualPool[prefab] = stack;
+            }
+
+            // Get or Create
+            if (stack.Count > 0)
+            {
+                instance = stack.Pop();
+                instance.SetActive(true);
+            } else
+            {
+                instance = Instantiate(prefab, transform);
+            }
+
+            // Position it
+            instance.transform.position = _grid.GridToWorld(pos);
+            instance.transform.rotation = Quaternion.identity;
+
+            // Fix scale (reset potentially modified scale from previous use)
+            instance.transform.localScale = Vector3.one * Mathf.Max(0.25f, _grid.CellSize * 0.7f);
+
+            return instance;
+        }
+
+        private void ReturnPooledVisual(GameObject instance, GameObject prefabKey)
+        {
+            if (!instance)
+            {
+                return;
+            }
+
+            if (!prefabKey)
+            {
+                Destroy(instance);
+
+                return;
+            }
+
+            instance.SetActive(false);
+
+            if (!_visualPool.TryGetValue(prefabKey, out var stack))
+            {
+                stack = new Stack<GameObject>();
+                _visualPool[prefabKey] = stack;
+            }
+
+            stack.Push(instance);
+        }
+
+        // ----------------------------- Utils -----------------------------
 
         private FoodTypeSo PickRandomFoodType()
         {
-            if (settings.AvailableFoodTypes == null || settings.AvailableFoodTypes.Length == 0)
-                return null;
-
-            var candidates = new List<FoodTypeSo>();
-            var total = 0f;
-
-            foreach (var t in settings.AvailableFoodTypes)
+            // Weighted random selection
+            if (_settings.AvailableFoodTypes == null)
             {
-                if (!t || !t.CanSpawnNaturally) continue;
-                if (_cooldownUntil.TryGetValue(t, out var until) && Time.time < until) continue;
+                return null;
+            }
+
+            var totalWeight = 0f;
+            var candidates = new List<FoodTypeSo>();
+
+            foreach (var t in _settings.AvailableFoodTypes)
+            {
+                if (!t || !t.CanSpawnNaturally)
+                {
+                    continue;
+                }
+
+                // Check cooldown
+                if (_cooldowns.TryGetValue(t, out var unlockTime) && Time.time < unlockTime)
+                {
+                    continue;
+                }
 
                 candidates.Add(t);
-                total += Mathf.Max(0.0001f, t.SpawnWeight);
+                totalWeight += t.SpawnWeight;
             }
 
-            if (candidates.Count == 0) return null;
+            if (candidates.Count == 0)
+            {
+                return null;
+            }
 
-            var pick = UnityEngine.Random.Range(0f, total);
+            var randomPoint = UnityEngine.Random.Range(0f, totalWeight);
+
             foreach (var t in candidates)
             {
-                pick -= Mathf.Max(0.0001f, t.SpawnWeight);
-                if (pick <= 0f) return t;
+                if (randomPoint < t.SpawnWeight)
+                {
+                    return t;
+                }
+
+                randomPoint -= t.SpawnWeight;
             }
 
-            return candidates[^1];
+            return candidates.Last();
         }
 
         private void ScheduleNextNaturalSpawn()
         {
-            _nextNaturalSpawn = Time.time + UnityEngine.Random.Range(
-                settings.FoodSpawnIntervalMin,
-                settings.FoodSpawnIntervalMax);
+            var delay = UnityEngine.Random.Range(_settings.FoodSpawnIntervalMin, _settings.FoodSpawnIntervalMax);
+            _nextNaturalSpawnTime = Time.time + delay;
         }
 
-        // ======================== Events ========================
+        // ----------------------------- Events -----------------------------
 
         public event Action<GridPosition, FoodTypeSo> OnFoodSpawned;
         public event Action<GridPosition, FoodTypeSo> OnFoodRemoved;
-    }
-
-    // Simple pooled list to avoid GC allocation
-    internal static class ListPool<T>
-    {
-        private static readonly Stack<List<T>> Pool = new();
-
-        public static List<T> Get()
-        {
-            return Pool.Count > 0 ? Pool.Pop() : new List<T>();
-        }
-
-        public static void Release(List<T> list)
-        {
-            list.Clear();
-            Pool.Push(list);
-        }
     }
 }

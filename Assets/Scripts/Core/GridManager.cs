@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using SnakeGame.Data;
 
@@ -222,6 +223,61 @@ namespace SnakeGame.Core
             }
 
             return _cells[GetFlatIndex(pos.X, pos.Y, pos.Z)];
+        }
+        
+        /// <summary>
+        /// Tries to find a sequence of empty cells for spawning a snake.
+        /// Returns true if found, and outputs the list of positions (Head to Tail).
+        /// </summary>
+        public bool TryFindFreeSnakePath(int length, out List<GridPosition> path)
+        {
+            path = new List<GridPosition>();
+    
+            // Try random attempts to find a valid start + direction
+            for (int i = 0; i < 50; i++)
+            {
+                // 1. Pick random head
+                GridPosition headPos;
+                try 
+                { 
+                    headPos = GetRandomEmptyPosition(); 
+                } 
+                catch 
+                { 
+                    return false; // Grid full
+                }
+
+                // 2. Pick random direction for the body to extend BEHIND the head
+                // Note: If snake moves RIGHT, the body extends LEFT.
+                var moveDir = GridPosition.Directions3D[UnityEngine.Random.Range(0, GridPosition.Directions3D.Length)];
+                var bodyDir = new GridPosition(-moveDir.X, -moveDir.Y, -moveDir.Z); // Opposite of movement
+
+                path.Clear();
+                path.Add(headPos);
+
+                bool pathValid = true;
+                var current = headPos;
+
+                // Check if full length fits
+                for (int j = 1; j < length; j++)
+                {
+                    current += bodyDir;
+                    
+                    if (!IsValidPosition(current) || !PeekCell(current).IsEmpty)
+                    {
+                        pathValid = false;
+                        break;
+                    }
+                    path.Add(current);
+                }
+
+                if (pathValid)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // ---------- Optimized Random Selection ----------

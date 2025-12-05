@@ -2,69 +2,72 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using SnakeGame.Core;
 using SnakeGame.AI;
-using SnakeGame.Utils;
 using SnakeGame.Data;
 
 namespace SnakeGame.Core
 {
     public class SnakeMovementController : MonoBehaviour
     {
-        // ---------- Serialized config ----------
-        [Header("Dependencies")] [SerializeField]
+        // ---------- Serialized Config ----------
+        [Header("Dependencies")]
+        [SerializeField]
         private GridManager grid;
 
-        [SerializeField] private FoodManager food;
+        [SerializeField]
+        private FoodManager food;
 
-        [Header("Snake Data (SO)")] [SerializeField]
+        [SerializeField]
         private SnakeDataSo snakeData;
 
-        [Header("Visuals (optional)")] [SerializeField]
+        [Header("Visuals")]
+        [SerializeField]
         private Transform headPrefab;
 
-        [SerializeField] 
+        [SerializeField]
         private Transform bodyPrefab;
-        [SerializeField] 
+
+        [Tooltip("If empty, will try to take material from HeadPrefab")]
+        [SerializeField]
         private Material headMaterialOverride;
-        [SerializeField] 
+
+        [Tooltip("If empty, will try to take material from BodyPrefab")]
+        [SerializeField]
         private Material bodyMaterialOverride;
-        [SerializeField] 
+
+        [SerializeField]
         private Transform snakeContainer;
 
-        [Header("Execution")] [SerializeField] private bool useInternalLoop = true;
+        [Header("Execution")]
+        [SerializeField]
+        private bool useInternalLoop = true;
 
-        private readonly List<GridPosition> bodyPositions = new();
-        private readonly List<Transform> bodySegments = new();
-        
-        private static bool IsOpposite(in GridPosition a, in GridPosition b)
-        {
-            return a.X == -b.X && a.Y == -b.Y && a.Z == -b.Z;
-        }
+        private readonly List<GridPosition> _bodyPositions = new();
+        private readonly List<Transform> _bodyTransforms = new();
 
-        private GridPosition currentDirection;
-        private float currentSpeed = 2f;
-        private int growthPending = 0;
-        private bool isAlive = true;
-        private Coroutine moveCoroutine;
+        private GridPosition _currentDirection;
+        private float _currentSpeed = 2f;
+        private int _growthPending = 0;
+        private bool _isAlive = true;
+        private Coroutine _moveCoroutine;
+        private IControlledSnakeAI _ai;
 
-        private IControlledSnakeAI ai;
-        private bool initialised;
+        private Material _runtimeHeadMat;
+        private Material _runtimeBodyMat;
 
-        // Registry so snakes can find each other (used for ad-hoc collision checks in internal mode)
+        private WaitForSeconds _cachedWait;
+        private float _lastCachedSpeed = -1f;
+
         private static readonly Dictionary<string, SnakeMovementController> Registry = new();
 
-        // ---------- Public API ----------
-        public bool IsAlive => isAlive;
+        public bool IsAlive => _isAlive;
+        public string SnakeId => snakeData ? snakeData.SnakeID : name;
+        public IReadOnlyList<GridPosition> Body => _bodyPositions;
 
-        public string SnakeId => snakeData != null && !string.IsNullOrEmpty(snakeData.SnakeID)
-            ? snakeData.SnakeID
-            : $"Snake_{GetInstanceID()}";
-
-        public IReadOnlyList<GridPosition> Body => bodyPositions;
-        public GridPosition HeadPosition => bodyPositions.Count > 0 ? bodyPositions[0] : default;
-        public int Length => bodyPositions.Count;
-        public GridPosition CurrentDirection => currentDirection;
+        // Head is now at index 0
+        public GridPosition HeadPosition => _bodyPositions.Count > 0 ? _bodyPositions[0] : default;
+        private int Length => _bodyPositions.Count;
+        public GridPosition CurrentDirection => _currentDirection;
 
         public event Action<GridPosition> OnMove;
         public event Action<GridPosition> OnEatFood;
@@ -82,15 +85,9 @@ namespace SnakeGame.Core
             snakeData = data;
         }
 
-        public void SetAI(IControlledSnakeAI controllerAI)
-        {
-            ai = controllerAI;
-        }
-
         public void AssignAI(IControlledSnakeAI controllerAI)
         {
-            SetAI(controllerAI);
-            // compatibility alias
+            _ai = controllerAI;
         }
 
         private void Awake()
@@ -107,532 +104,513 @@ namespace SnakeGame.Core
         {
             if (!ValidateSetup())
             {
-                Debug.LogError($"[{name}] SnakeMovementController: missing GridManager or SnakeDataSo.");
-                isAlive = false;
-                enabled = false;
                 return;
             }
 
-            // Resolve prefabs from SO if not explicitly provided
-            ResolvePrefabsFromSnakeData();
-
-            // Register for cross-snake queries
             Registry[SnakeId] = this;
 
+            // Load Prefabs AND Materials
+            ResolveVisualsFromData();
             InitializeSnake();
 
             if (useInternalLoop)
-                moveCoroutine = StartCoroutine(MoveLoop());
+            {
+                _moveCoroutine = StartCoroutine(MoveLoop());
+            }
         }
 
         private bool ValidateSetup()
         {
-            if (grid == null || snakeData == null || food == null) return false;
-            currentSpeed = Mathf.Max(0.1f, snakeData.BaseSpeed);
-            initialised = true;
+            if (!grid || !food || !snakeData)
+            {
+                Debug.LogError($"[{name}] Missing dependencies!");
+                _isAlive = false;
+                enabled = false;
+
+                return false;
+            }
+
+            _currentSpeed = Mathf.Max(0.1f, snakeData.BaseSpeed);
+
             return true;
         }
 
-        private void ResolvePrefabsFromSnakeData()
+        private void ResolveVisualsFromData()
         {
-            // Try to pick head/body prefabs from SO (supports either Transform or GameObject fields).
-            if (snakeData == null) return;
-            var t = snakeData.GetType();
-
-            if (headPrefab == null)
+            if (!snakeData)
             {
-                var hp = t.GetProperty("HeadPrefab");
-                if (hp != null)
+                return;
+            }
+
+            // 1. Resolve Prefabs
+            if (!headPrefab && snakeData.HeadPrefab)
+            {
+                headPrefab = snakeData.HeadPrefab.transform;
+            }
+
+            if (!bodyPrefab && snakeData.BodyPrefab)
+            {
+                bodyPrefab = snakeData.BodyPrefab.transform;
+            }
+
+            // 2. Resolve Materials
+            _runtimeHeadMat = headMaterialOverride;
+
+            if (!_runtimeHeadMat && headPrefab)
+            {
+                var r = headPrefab.GetComponentInChildren<Renderer>();
+
+                if (r)
                 {
-                    var val = hp.GetValue(snakeData);
-                    if (val is Transform ht) headPrefab = ht;
-                    else if (val is GameObject hg) headPrefab = hg.transform;
+                    _runtimeHeadMat = r.sharedMaterial;
                 }
             }
 
-            if (bodyPrefab == null)
+            _runtimeBodyMat = bodyMaterialOverride;
+
+            if (!_runtimeBodyMat && bodyPrefab)
             {
-                var bp = t.GetProperty("BodyPrefab");
-                if (bp != null)
+                var r = bodyPrefab.GetComponentInChildren<Renderer>();
+
+                if (r)
                 {
-                    var val = bp.GetValue(snakeData);
-                    if (val is Transform bt) bodyPrefab = bt;
-                    else if (val is GameObject bg) bodyPrefab = bg.transform;
+                    _runtimeBodyMat = r.sharedMaterial;
                 }
             }
         }
 
         private void InitializeSnake()
         {
-            bodyPositions.Clear();
+            _bodyPositions.Clear();
+            _bodyTransforms.Clear();
 
-            // Pick a valid start head and a direction that fits initial length
-            var start = grid.GetRandomEmptyPosition();
-            var dirs = GridPosition.Directions3D;
-            var chosen = GridPosition.Right;
-            var initLen = Mathf.Max(1, snakeData.StartLength);
+            foreach (Transform child in snakeContainer)
+            {
+                Destroy(child.gameObject);
+            }
 
-            var placed = false;
-            foreach (var d in dirs)
-                if (TryBuildInitialBody(start, d, initLen))
+            // CHANGED: Try to find a path for the FULL length immediately
+            var startLen = snakeData.StartLength;
+
+            if (grid.TryFindFreeSnakePath(startLen, out var spawnPath))
+            {
+                // spawnPath[0] is Head, spawnPath[Last] is Tail
+                _currentDirection = GridPosition.Right; // Default, will update below
+
+                // Calculate initial direction based on head vs body[1]
+                if (spawnPath.Count > 1)
                 {
-                    chosen = d;
-                    placed = true;
-                    break;
+                    var dir = spawnPath[0] - spawnPath[1];
+
+                    if (dir != GridPosition.Zero)
+                    {
+                        _currentDirection = dir;
+                    }
                 }
 
-            if (!placed)
+                // Create segments
+                for (var i = 0; i < spawnPath.Count; i++)
+                {
+                    var pos = spawnPath[i];
+                    var isHead = i == 0;
+                    _bodyPositions.Add(pos);
+                    CreateVisualSegment(pos, isHead);
+                    grid.SetCellOccupied(pos, SnakeId, isHead);
+                }
+
+                _growthPending = 0; // Already fully grown
+                Debug.Log($"[{SnakeId}] Spawned fully grown at {HeadPosition}, Length: {startLen}");
+            } else
             {
-                bodyPositions.Add(start); // fallback to head only
-                initLen = 1;
+                // Fallback: If no space for full body, spawn just head (old logic)
+                Debug.LogWarning($"[{SnakeId}] No space for full spawn. Spawning head only.");
+                var startPos = grid.GetRandomEmptyPosition();
+                _bodyPositions.Add(startPos);
+                _currentDirection = GridPosition.Right;
+                CreateVisualSegment(startPos, true);
+                grid.SetCellOccupied(startPos, SnakeId, true);
+                _growthPending = Mathf.Max(0, startLen - 1);
             }
-
-            currentDirection = chosen;
-
-            CreateOrSyncVisualSegments();
-            UpdateGridOccupancy();
-
-            Debug.Log($"[{SnakeId}] Spawned at {HeadPosition} len={Length} dir={currentDirection}");
         }
 
-        private bool TryBuildInitialBody(in GridPosition headStart, in GridPosition dir, int len)
-        {
-            var pos = headStart;
-            var tmp = new List<GridPosition>(len);
-            for (var i = 0; i < len; i++)
-            {
-                if (!grid.IsValidPosition(pos) || grid.IsOccupied(pos)) return false;
-                tmp.Add(pos);
-                pos -= dir; // extend backwards
-            }
-
-            bodyPositions.AddRange(tmp);
-            return true;
-        }
-
-        // ----------------------------- Internal loop (optional) -----------------------------
+        // ----------------------------- Loop -----------------------------
         private IEnumerator MoveLoop()
         {
-            var wait = new WaitForSeconds(Mathf.Max(0.02f, 1f / currentSpeed));
-            while (isAlive)
+            while (_isAlive)
             {
-                var dir = ComputeNextDirection();
-                StepWithInternalCollision(dir);
-                wait = new WaitForSeconds(Mathf.Max(0.02f, 1f / currentSpeed));
-                yield return wait;
+                if (_cachedWait == null || !Mathf.Approximately(_lastCachedSpeed, _currentSpeed))
+                {
+                    _lastCachedSpeed = _currentSpeed;
+                    var delay = Mathf.Max(0.02f, 1f / _currentSpeed);
+                    _cachedWait = new WaitForSeconds(delay);
+                }
+
+                yield return _cachedWait;
+
+                // 1. Determine where we WANT to go
+                var desiredMove = ComputeDesiredDirection();
+                var nextPos = HeadPosition + desiredMove;
+
+                // 2. Check what is at that position
+                if (!grid.IsValidPosition(nextPos))
+                {
+                    Kill("Hit Wall");
+                }
+                // Check for Food explicitly BEFORE checking IsOccupied.
+                // Grid.IsOccupied returns true for Food, so this check must come first.
+                else if (food != null && food.IsFoodAt(nextPos))
+                {
+                    PerformMove(desiredMove); // Safe to move (eat)
+                } else if (grid.IsOccupied(nextPos))
+                {
+                    // It is occupied by a snake (self or other) or an obstacle.
+                    // Special Exception: Chasing own tail is valid if we aren't growing
+                    var isMyTail = nextPos.Equals(_bodyPositions[_bodyPositions.Count - 1]);
+
+                    if (isMyTail && _growthPending <= 0)
+                    {
+                        PerformMove(desiredMove);
+                    } else
+                    {
+                        // The intended path is blocked. Try to find a free adjacent cell.
+                        GridPosition evasionDir = FindEvasionDirection();
+
+                        if (evasionDir != GridPosition.Zero)
+                        {
+                            Debug.LogWarning($"[{SnakeId}] Dodge triggered! Avoiding collision.");
+                            PerformMove(evasionDir);
+                        } else
+                        {
+                            // No escape route found. Death.
+                            Kill("Crashed into Snake/Obstacle");
+                        }
+                    }
+                } else
+                {
+                    // Cell is completely empty
+                    PerformMove(desiredMove);
+                }
             }
         }
 
-        /// <summary>
-        /// Compute direction for the next tick (AI if available, else keep current).
-        /// </summary>
-        private GridPosition ComputeNextDirection()
+        private GridPosition ComputeDesiredDirection()
         {
-            // 2.1 First, ask AI if present
-            if (ai != null)
+            var intendedDir = GridPosition.Zero;
+
+            if (_ai != null)
+            {
                 try
                 {
-                    var next = ai.GetNextMove(this);
-                    if (next != GridPosition.Zero)
-                        return next;
-                }
-                catch (Exception ex)
+                    intendedDir = _ai.GetNextMove(this);
+                } catch
                 {
-                    Debug.LogWarning($"[{SnakeId}] AI GetNextMove threw: {ex.Message}");
+                }
+            }
+
+            // If AI returns Zero (confused) or no AI, keep going straight
+            if (intendedDir == GridPosition.Zero)
+            {
+                intendedDir = _currentDirection;
+            }
+
+            // Prevent 180 turn (Suicide backwards) - this is a fundamental movement rule, not obstacle avoidance
+            if (IsOpposite(intendedDir, _currentDirection) && Length > 1)
+            {
+                return _currentDirection;
+            }
+
+            return intendedDir;
+        }
+
+        private GridPosition ComputeSafeDirection(GridPosition desired)
+        {
+            if (IsMoveSafe(HeadPosition + desired))
+            {
+                return desired;
+            }
+
+            // Panic Mode: Try other directions
+            foreach (var dir in GridPosition.Directions3D)
+            {
+                if (IsOpposite(dir, _currentDirection) && Length > 1)
+                {
+                    continue;
                 }
 
-            // 2.2 No AI or AI had no preference → go greedily toward nearest food (if any)
-            var target = food?.FindNearestFood(HeadPosition); // O(#food), no grid scan
-            if (target.HasValue)
-            {
-                var dir = ChooseSafeStepToward(HeadPosition, target.Value);
-                if (dir != GridPosition.Zero)
+                if (IsMoveSafe(HeadPosition + dir))
+                {
                     return dir;
-            }
-
-            // 2.3 Fallback: keep current direction or pick any safe direction
-            if (currentDirection != GridPosition.Zero)
-                return currentDirection;
-
-            var any = PickAnySafeDirection();
-            return any != GridPosition.Zero ? any : GridPosition.Right;
-        }
-
-        /// <summary>
-        /// Choose a single-cell step that reduces Manhattan distance to target,
-        /// preferring the axis with the largest absolute delta. Avoids reversing,
-        /// out-of-bounds, and immediate self-collision.
-        /// </summary>
-        private GridPosition ChooseSafeStepToward(in GridPosition from, in GridPosition to)
-        {
-            var dx = to.X - from.X;
-            var dy = to.Y - from.Y;
-            var dz = to.Z - from.Z;
-
-            // Build axis candidates, ordered by |delta| descending (greedy)
-            var candidates = new List<(int mag, GridPosition step)>(3);
-            if (dx != 0) candidates.Add((Math.Abs(dx), new GridPosition(MathUtils.SignInt(dx), 0, 0)));
-            if (dy != 0) candidates.Add((Math.Abs(dy), new GridPosition(0, MathUtils.SignInt(dy), 0)));
-            if (dz != 0) candidates.Add((Math.Abs(dz), new GridPosition(0, 0, MathUtils.SignInt(dz))));
-            candidates.Sort((a, b) => b.mag.CompareTo(a.mag)); // descending
-
-            // Try greedy axes first
-            foreach (var c in candidates)
-            {
-                var step = c.step;
-                if (IsStepSafe(step))
-                    return step;
-            }
-
-            // If greedy axes are blocked, try any safe direction
-            return PickAnySafeDirection();
-        }
-
-        /// <summary>
-        /// A direction is safe if the immediate next head cell is valid and not our body (ignoring tail that moves).
-        /// Prevents 180° reversal.
-        /// </summary>
-        private bool IsStepSafe(in GridPosition step)
-        {
-            if (step == GridPosition.Zero) return false;
-
-            // Don't reverse into our own neck
-            if (IsOpposite(step, currentDirection) && bodyPositions.Count > 1)
-                return false;
-
-            var next = HeadPosition + step;
-
-            // Bounds check
-            if (!grid.IsValidPosition(next))
-                return false;
-
-            // Immediate self-collision (ignore last tail cell which may move)
-            var limit = Mathf.Max(0, bodyPositions.Count - 1);
-            for (var i = 0; i < limit; i++)
-                if (bodyPositions[i].Equals(next))
-                    return false;
-
-            return true;
-        }
-
-        /// <summary>
-        /// Try any of the 6 cardinal directions that are safe.
-        /// </summary>
-        private GridPosition PickAnySafeDirection()
-        {
-            var dirs = GridPosition.Directions3D; // {±X, ±Y, ±Z}
-            // Try to keep current tendency first
-            for (var pass = 0; pass < 2; pass++)
-                foreach (var d in dirs)
-                {
-                    // First pass prefers not changing direction too much
-                    if (pass == 0 && currentDirection != GridPosition.Zero && d != currentDirection) continue;
-                    if (IsStepSafe(d)) return d;
                 }
+            }
 
-            // Nothing found
             return GridPosition.Zero;
         }
 
-        /// <summary>
-        /// Apply a move that has already been conflict-resolved externally (no inter-snake checks here).
-        /// </summary>
-        public void ApplyResolvedMove(in GridPosition direction)
+        private bool IsMoveSafe(GridPosition targetPos)
         {
-            if (!isAlive) return;
-
-            var newHead = HeadPosition + direction;
-
-            // Bounds + self check remain
-            if (!grid.IsValidPosition(newHead) || SelfCollision(newHead))
+            if (!grid.IsValidPosition(targetPos))
             {
-                Death($"Invalid move into {newHead}");
-                return;
+                return false;
             }
 
-            ClearGridOccupancy();
+            // Grid.IsOccupied returns true for food, which caused the snake to avoid it.
+            if (food != null && food.IsFoodAt(targetPos))
+            {
+                return true;
+            }
 
-            bodyPositions.Insert(0, newHead);
-            if (growthPending > 0) growthPending--;
-            else if (bodyPositions.Count > 0) bodyPositions.RemoveAt(bodyPositions.Count - 1);
+            if (grid.IsOccupied(targetPos))
+            {
+                // Safe to move into own tail if not growing (tail will move away)
+                // List: Tail is at Count - 1
+                var tailPos = _bodyPositions[_bodyPositions.Count - 1];
+                var isMyTail = targetPos.Equals(tailPos);
 
-            UpdateGridOccupancy();
-            CheckFoodCollision(newHead);
-            CreateOrSyncVisualSegments(); // maintain head/body visuals (first segment is head)
-            UpdateVisuals();
+                if (isMyTail && _growthPending <= 0)
+                {
+                    return true;
+                }
 
-            currentDirection = direction;
-            OnMove?.Invoke(newHead);
+                return false;
+            }
+
+            return true;
         }
 
-        /// <summary>
-        /// Internal mode only: does inter-snake resolution heuristically. For perfectly fair outcomes, prefer external tick.
-        /// </summary>
-        private void StepWithInternalCollision(in GridPosition direction)
+        // ----------------------------- Movement -----------------------------
+        private void PerformMove(GridPosition direction)
         {
-            if (!isAlive) return;
-            var newHead = HeadPosition + direction;
-
-            // Bounds + self collision
-            if (!grid.IsValidPosition(newHead) || SelfCollision(newHead))
+            if (!_isAlive)
             {
-                Death($"Invalid move into {newHead}");
                 return;
             }
 
-            // Heuristic inter-snake checks BEFORE clearing our occupancy
-            var cell = grid.PeekCell(newHead);
-            if (cell != null && !string.IsNullOrEmpty(cell.OccupantId) && cell.OccupantId != SnakeId)
+            var newHeadPos = HeadPosition + direction;
+            var oldHeadPos = HeadPosition;
+            var tailRemoved = false;
+            GridPosition tailPos = default;
+
+            // Logic Update
+            if (_growthPending > 0)
             {
-                // Body -> attacker dies
-                if (cell.State == CellState.SnakeBody)
+                _growthPending--;
+            } else
+            {
+                // List: Tail is at the end
+                var tailIndex = _bodyPositions.Count - 1;
+                tailPos = _bodyPositions[tailIndex];
+                _bodyPositions.RemoveAt(tailIndex); // Remove Tail
+
+                if (!tailPos.Equals(newHeadPos))
                 {
-                    Death($"Hit other snake's BODY at {newHead}");
+                    grid.ClearCell(tailPos);
+                }
+
+                tailRemoved = true;
+            }
+
+            CheckFood(newHeadPos);
+
+            // List: Head is at 0
+            _bodyPositions.Insert(0, newHeadPos);
+            _currentDirection = direction;
+
+            // Grid Update
+            grid.SetCellOccupied(newHeadPos, SnakeId, true);
+
+            if (_bodyPositions.Count > 1)
+            {
+                // The old head is now a body part
+                grid.SetCellOccupied(oldHeadPos, SnakeId, false);
+            }
+
+            // Visual Update
+            UpdateVisualsEfficiently(newHeadPos, tailRemoved);
+            CheckFood(newHeadPos);
+            OnMove?.Invoke(newHeadPos);
+        }
+        
+        /// <summary>
+        /// Scans all directions to find a safe spot to move to immediately.
+        /// Used when the primary path is blocked.
+        /// </summary>
+        private GridPosition FindEvasionDirection()
+        {
+            foreach (var dir in GridPosition.Directions3D)
+            {
+                // Don't turn 180 degrees into our own neck
+                if (IsOpposite(dir, _currentDirection) && Length > 1) continue;
+
+                var targetPos = HeadPosition + dir;
+
+                // Check 1: Is inside grid?
+                if (!grid.IsValidPosition(targetPos)) continue;
+
+                // Check 2: Is Food? (Safe)
+                if (food != null && food.IsFoodAt(targetPos)) return dir;
+
+                // Check 3: Is Empty? (Safe)
+                // Use !IsOccupied here. Since we already checked Food above, 
+                // IsOccupied = true means it's a snake body or wall.
+                if (!grid.IsOccupied(targetPos)) return dir;
+            }
+
+            return GridPosition.Zero;
+        }
+
+        private void UpdateVisualsEfficiently(GridPosition newHeadPos, bool recycleTail)
+        {
+            // Case A: Growing -> Create new Head visual
+            if (!recycleTail)
+            {
+                if (_bodyTransforms.Count > 0)
+                {
+                    SetVisualData(_bodyTransforms[0], false); // Old head (0) becomes Body
+                }
+
+                CreateVisualSegment(newHeadPos, true); // New Head at 0
+            }
+            // Case B: Moving -> Recycle Tail to become new Head
+            else
+            {
+                if (_bodyTransforms.Count == 0)
+                {
                     return;
                 }
 
-                // Head-on (into existing head cell)
-                if (cell.State == CellState.SnakeHead && TryResolveHeadOn(cell.OccupantId, newHead))
-                    return; // resolution killed us; otherwise continue
-            }
+                // List: Tail is at Count - 1
+                var tailIndex = _bodyTransforms.Count - 1;
+                var recycledSegment = _bodyTransforms[tailIndex];
+                _bodyTransforms.RemoveAt(tailIndex);
 
-            // Extra: detect "same target" and "swap" head-on even if the other cleared its cell earlier
-            foreach (var kv in Registry)
-            {
-                var other = kv.Value;
-                if (other == null || !other.isAlive || other == this) continue;
-
-                var otherNextDir = other.ComputeNextDirection(); // best-effort prediction
-                var otherPlanned = other.HeadPosition + otherNextDir;
-
-                // Same target cell head-on
-                if (otherPlanned.Equals(newHead))
-                    if (ResolveMutualHeadOn(other))
-                        return;
-
-                // Swap head-on (A -> B.head, B -> A.head)
-                if (other.HeadPosition.Equals(newHead) && otherPlanned.Equals(HeadPosition))
-                    if (ResolveMutualHeadOn(other))
-                        return;
-            }
-
-            // Move and update
-            ClearGridOccupancy();
-
-            bodyPositions.Insert(0, newHead);
-            if (growthPending > 0) growthPending--;
-            else if (bodyPositions.Count > 0) bodyPositions.RemoveAt(bodyPositions.Count - 1);
-
-            UpdateGridOccupancy();
-            CheckFoodCollision(newHead);
-            CreateOrSyncVisualSegments();
-            UpdateVisuals();
-
-            currentDirection = direction;
-            OnMove?.Invoke(newHead);
-        }
-
-        // Try to resolve when we step into a cell marked as other snake's head.
-        private bool TryResolveHeadOn(string otherId, in GridPosition newHead)
-        {
-            if (!Registry.TryGetValue(otherId, out var other) || other == null || !other.isAlive)
-                return false;
-
-            var myLen = Length;
-            var otherLen = other.Length;
-
-            if (myLen > otherLen)
-            {
-                other.Kill($"Head-on vs longer {SnakeId} at {newHead}");
-                return false; // we survive
-            }
-            else if (myLen < otherLen)
-            {
-                Death($"Head-on vs longer {other.SnakeId} at {newHead}");
-                return true;
-            }
-            else
-            {
-                other.Kill($"Head-on equal size vs {SnakeId} at {newHead}");
-                Death($"Head-on equal size vs {other.SnakeId} at {newHead}");
-                return true;
-            }
-        }
-
-        // Resolve head-on when both attempt same cell or swap heads (best-effort in internal mode).
-        private bool ResolveMutualHeadOn(SnakeMovementController other)
-        {
-            if (other == null || !other.isAlive) return false;
-
-            // To avoid double-processing from both snakes, the lexicographically "smaller" id resolves.
-            if (string.CompareOrdinal(SnakeId, other.SnakeId) > 0) return false;
-
-            var myLen = Length;
-            var otherLen = other.Length;
-
-            if (myLen > otherLen)
-            {
-                other.Kill($"Head-on (mutual) vs longer {SnakeId}");
-                return false;
-            }
-            else if (myLen < otherLen)
-            {
-                Death($"Head-on (mutual) vs longer {other.SnakeId}");
-                return true;
-            }
-            else
-            {
-                other.Kill($"Head-on (mutual) equal vs {SnakeId}");
-                Death($"Head-on (mutual) equal vs {other.SnakeId}");
-                return true;
-            }
-        }
-
-        private bool SelfCollision(in GridPosition p)
-        {
-            var limit = Mathf.Max(0, bodyPositions.Count - 1);
-            for (var i = 0; i < limit; i++)
-                if (bodyPositions[i].Equals(p))
-                    return true;
-            return false;
-        }
-
-        // ----------------------------- Grid/food/visuals -----------------------------
-        private void UpdateGridOccupancy()
-        {
-            for (var i = 0; i < bodyPositions.Count; i++)
-            {
-                var isHead = i == 0;
-                grid.SetCellOccupied(bodyPositions[i], SnakeId, isHead);
-            }
-        }
-
-        private void ClearGridOccupancy()
-        {
-            for (var i = 0; i < bodyPositions.Count; i++)
-                grid.ClearCell(bodyPositions[i]);
-        }
-
-        private void CheckFoodCollision(in GridPosition head)
-        {
-            if (food == null) return;
-            if (!food.IsFoodAt(head)) return;
-
-            var type = food.EatFood(head);
-            if (type != null)
-            {
-                growthPending += 1; // simple rule: grow by 1
-                OnEatFood?.Invoke(head);
-            }
-        }
-
-        private void CreateOrSyncVisualSegments()
-        {
-            // Ensure we have transforms matching body count
-            while (bodySegments.Count < bodyPositions.Count)
-            {
-                var index = bodySegments.Count;
-                var prefab = index == 0 ? headPrefab ? headPrefab : bodyPrefab ? bodyPrefab : null
-                    : bodyPrefab ? bodyPrefab
-                    : headPrefab ? headPrefab : null;
-
-                Transform t;
-                if (prefab != null)
+                // Old head (0) becomes Body
+                if (_bodyTransforms.Count > 0)
                 {
-                    t = Instantiate(prefab, snakeContainer);
-                }
-                else
-                {
-                    var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                    var col = go.GetComponent<Collider>();
-                    if (col) Destroy(col);
-                    t = go.transform;
-                    t.SetParent(snakeContainer, false);
+                    SetVisualData(_bodyTransforms[0], false);
                 }
 
-                t.name = index == 0 ? "Head" : $"Body_{index}";
-                bodySegments.Add(t);
+                // Setup Recycled Segment as new Head
+                recycledSegment.position = grid.GridToWorld(newHeadPos);
+                recycledSegment.rotation = Quaternion.identity;
+                SetVisualData(recycledSegment, true);
+
+                // Insert at 0 (Head)
+                _bodyTransforms.Insert(0, recycledSegment);
             }
 
-            // Remove extra transforms if body shrank
-            for (var i = bodySegments.Count - 1; i >= bodyPositions.Count; i--)
+            // Rotate Head (Index 0)
+            if (_bodyTransforms.Count > 0)
             {
-                if (bodySegments[i]) Destroy(bodySegments[i].gameObject);
-                bodySegments.RemoveAt(i);
-            }
+                var headT = _bodyTransforms[0];
+                var dirVec = new Vector3(_currentDirection.X, _currentDirection.Y, _currentDirection.Z);
 
-            // Apply materials (head/body) if overrides are provided
-            for (var i = 0; i < bodySegments.Count; i++)
-            {
-                var t = bodySegments[i];
-                if (!t) continue;
-
-                if (i == 0 && headMaterialOverride)
-                    TryApplySharedMaterial(t.gameObject, headMaterialOverride);
-                else if (i > 0 && bodyMaterialOverride)
-                    TryApplySharedMaterial(t.gameObject, bodyMaterialOverride);
-            }
-        }
-
-        private void TryApplySharedMaterial(GameObject go, Material mat)
-        {
-            if (!go || !mat) return;
-            var mr = go.GetComponentInChildren<Renderer>();
-            if (mr) mr.sharedMaterial = mat; // use shared to avoid instantiation/allocs
-        }
-
-        private void UpdateVisuals()
-        {
-            for (var i = 0; i < bodyPositions.Count && i < bodySegments.Count; i++)
-            {
-                var seg = bodySegments[i];
-                if (!seg) continue;
-
-                seg.position = grid.GridToWorld(bodyPositions[i]);
-
-                if (i == 0 && currentDirection != GridPosition.Zero)
+                if (dirVec != Vector3.zero)
                 {
-                    var dirVector = new Vector3(currentDirection.X, currentDirection.Y, currentDirection.Z);
-                    if (dirVector != Vector3.zero) seg.rotation = Quaternion.LookRotation(dirVector);
+                    headT.rotation = Quaternion.LookRotation(dirVec);
                 }
             }
         }
 
-        // ----------------------------- Death/cleanup -----------------------------
-        private void Kill(string reason)
+        private void CreateVisualSegment(GridPosition pos, bool isHead)
         {
-            Death(reason);
+            var prefab = isHead ? headPrefab ? headPrefab : bodyPrefab : bodyPrefab;
+
+            if (!prefab) // Fallback
+            {
+                var p = GameObject.CreatePrimitive(PrimitiveType.Cube);
+
+                if (Application.isPlaying)
+                {
+                    Destroy(p.GetComponent<Collider>());
+                }
+
+                prefab = p.transform;
+                p.transform.SetParent(snakeContainer);
+            }
+
+            var instance = Instantiate(prefab, grid.GridToWorld(pos), Quaternion.identity, snakeContainer);
+            SetVisualData(instance, isHead);
+
+            // List: Head at 0, Tail at End.
+            if (isHead)
+            {
+                _bodyTransforms.Insert(0, instance);
+            } else
+            {
+                _bodyTransforms.Add(instance);
+            }
         }
 
-        private void Death(string reason)
+        private void SetVisualData(Transform t, bool isHead)
         {
-            if (!isAlive) return;
-            isAlive = false;
+            t.name = isHead ? "Head" : "Body";
+            t.localScale = Vector3.one * (isHead ? 1.0f : 0.95f);
+            var targetMat = isHead ? _runtimeHeadMat : _runtimeBodyMat;
 
-            Debug.Log($"[{SnakeId}] Death: {reason}");
+            if (targetMat)
+            {
+                var r = t.GetComponentInChildren<Renderer>();
 
-            if (moveCoroutine != null) StopCoroutine(moveCoroutine);
-            ClearGridOccupancy();
+                if (r)
+                {
+                    r.sharedMaterial = targetMat;
+                }
+            }
+        }
+
+        private void CheckFood(GridPosition pos)
+        {
+            if (food && food.IsFoodAt(pos))
+            {
+                food.EatFood(pos);
+                _growthPending++;
+                OnEatFood?.Invoke(pos);
+            }
+        }
+
+        public void Kill(string reason)
+        {
+            if (!_isAlive)
+            {
+                return;
+            }
+
+            _isAlive = false;
+            Debug.Log($"[{SnakeId}] Died: {reason}");
+
+            if (_moveCoroutine != null)
+            {
+                StopCoroutine(_moveCoroutine);
+            }
+
+            foreach (var pos in _bodyPositions)
+            {
+                grid.ClearCell(pos);
+            }
+
             OnDeath?.Invoke(reason);
-
-            StartCoroutine(DeathAnimation());
+            Destroy(gameObject);
         }
 
-        private IEnumerator DeathAnimation()
+        private static bool IsOpposite(GridPosition a, GridPosition b)
         {
-            for (var i = bodySegments.Count - 1; i >= 0; i--)
-            {
-                if (bodySegments[i]) bodySegments[i].gameObject.SetActive(false);
-                yield return new WaitForSeconds(0.05f);
-            }
-
-            Destroy(gameObject, 0.5f);
+            return a.X == -b.X && a.Y == -b.Y && a.Z == -b.Z;
         }
 
         private void OnDestroy()
         {
-            Registry.Remove(SnakeId);
-            if (grid != null && isAlive) ClearGridOccupancy();
+            if (Registry.ContainsKey(SnakeId))
+            {
+                Registry.Remove(SnakeId);
+            }
+
+            if (grid && _isAlive)
+            {
+                foreach (var p in _bodyPositions)
+                {
+                    grid.ClearCell(p);
+                }
+            }
         }
     }
 }
