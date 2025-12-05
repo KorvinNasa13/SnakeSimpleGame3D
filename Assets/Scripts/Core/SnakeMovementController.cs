@@ -9,7 +9,6 @@ namespace SnakeGame.Core
 {
     public class SnakeMovementController : MonoBehaviour
     {
-        // ---------- Serialized Config ----------
         [Header("Dependencies")]
         [SerializeField]
         private GridManager grid;
@@ -59,6 +58,8 @@ namespace SnakeGame.Core
         private float _lastCachedSpeed = -1f;
 
         private static readonly Dictionary<string, SnakeMovementController> Registry = new();
+
+        private readonly Stack<Transform> _segmentPool = new();
 
         public bool IsAlive => _isAlive;
         public string SnakeId => snakeData ? snakeData.SnakeID : name;
@@ -181,12 +182,15 @@ namespace SnakeGame.Core
 
         private void InitializeSnake()
         {
+            CleanupVisuals();
             _bodyPositions.Clear();
-            _bodyTransforms.Clear();
 
             foreach (Transform child in snakeContainer)
             {
-                Destroy(child.gameObject);
+                if (child.gameObject.activeSelf)
+                {
+                    Destroy(child.gameObject);
+                }
             }
 
             // CHANGED: Try to find a path for the FULL length immediately
@@ -273,7 +277,7 @@ namespace SnakeGame.Core
                     } else
                     {
                         // The intended path is blocked. Try to find a free adjacent cell.
-                        GridPosition evasionDir = FindEvasionDirection();
+                        var evasionDir = FindEvasionDirection();
 
                         if (evasionDir != GridPosition.Zero)
                         {
@@ -302,8 +306,9 @@ namespace SnakeGame.Core
                 try
                 {
                     intendedDir = _ai.GetNextMove(this);
-                } catch
+                } catch (Exception e)
                 {
+                    Debug.LogError($"[{SnakeId}] AI Critical Error: {e}");
                 }
             }
 
@@ -428,7 +433,7 @@ namespace SnakeGame.Core
             UpdateVisualsEfficiently(newHeadPos, tailRemoved);
             OnMove?.Invoke(newHeadPos);
         }
-        
+
         /// <summary>
         /// Scans all directions to find a safe spot to move to immediately.
         /// Used when the primary path is blocked.
@@ -438,20 +443,32 @@ namespace SnakeGame.Core
             foreach (var dir in GridPosition.Directions3D)
             {
                 // Don't turn 180 degrees into our own neck
-                if (IsOpposite(dir, _currentDirection) && Length > 1) continue;
+                if (IsOpposite(dir, _currentDirection) && Length > 1)
+                {
+                    continue;
+                }
 
                 var targetPos = HeadPosition + dir;
 
                 // Check 1: Is inside grid?
-                if (!grid.IsValidPosition(targetPos)) continue;
+                if (!grid.IsValidPosition(targetPos))
+                {
+                    continue;
+                }
 
                 // Check 2: Is Food? (Safe)
-                if (food != null && food.IsFoodAt(targetPos)) return dir;
+                if (food != null && food.IsFoodAt(targetPos))
+                {
+                    return dir;
+                }
 
                 // Check 3: Is Empty? (Safe)
                 // Use !IsOccupied here. Since we already checked Food above, 
                 // IsOccupied = true means it's a snake body or wall.
-                if (!grid.IsOccupied(targetPos)) return dir;
+                if (!grid.IsOccupied(targetPos))
+                {
+                    return dir;
+                }
             }
 
             return GridPosition.Zero;
@@ -512,25 +529,42 @@ namespace SnakeGame.Core
 
         private void CreateVisualSegment(GridPosition pos, bool isHead)
         {
+            Transform instance;
             var prefab = isHead ? headPrefab ? headPrefab : bodyPrefab : bodyPrefab;
 
-            if (!prefab) // Fallback
+            if (!isHead && _segmentPool.Count > 0)
             {
-                var p = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                instance = _segmentPool.Pop();
+                instance.gameObject.SetActive(true);
+                instance.position = grid.GridToWorld(pos);
+                instance.rotation = Quaternion.identity;
 
-                if (Application.isPlaying)
+                if (instance.parent != snakeContainer)
                 {
-                    Destroy(p.GetComponent<Collider>());
+                    instance.SetParent(snakeContainer);
                 }
+            } else
+            {
+                if (!prefab)
+                {
+                    var p = GameObject.CreatePrimitive(PrimitiveType.Cube);
 
-                prefab = p.transform;
-                p.transform.SetParent(snakeContainer);
+                    if (Application.isPlaying)
+                    {
+                        Destroy(p.GetComponent<Collider>());
+                    }
+
+                    prefab = p.transform;
+                    p.transform.SetParent(snakeContainer);
+                    instance = p.transform;
+                } else
+                {
+                    instance = Instantiate(prefab, grid.GridToWorld(pos), Quaternion.identity, snakeContainer);
+                }
             }
 
-            var instance = Instantiate(prefab, grid.GridToWorld(pos), Quaternion.identity, snakeContainer);
             SetVisualData(instance, isHead);
 
-            // List: Head at 0, Tail at End.
             if (isHead)
             {
                 _bodyTransforms.Insert(0, instance);
@@ -582,13 +616,54 @@ namespace SnakeGame.Core
                 StopCoroutine(_moveCoroutine);
             }
 
-            foreach (var pos in _bodyPositions)
-            {
-                grid.ClearCell(pos);
-            }
-
+            CleanupAndUnsubscribe();
             OnDeath?.Invoke(reason);
             Destroy(gameObject);
+        }
+
+        private void ReturnSegmentToPool(Transform t)
+        {
+            if (!t)
+            {
+                return;
+            }
+
+            t.gameObject.SetActive(false);
+            _segmentPool.Push(t);
+        }
+
+        private void CleanupVisuals()
+        {
+            foreach (var t in _bodyTransforms)
+            {
+                if (t)
+                {
+                    if (t.name == "Head")
+                    {
+                        Destroy(t.gameObject);
+                    } else
+                    {
+                        ReturnSegmentToPool(t);
+                    }
+                }
+            }
+
+            _bodyTransforms.Clear();
+        }
+
+        private void CleanupAndUnsubscribe()
+        {
+            if (grid)
+            {
+                foreach (var pos in _bodyPositions)
+                {
+                    grid.ClearCell(pos);
+                }
+            }
+
+            OnMove = null;
+            OnEatFood = null;
+            OnDeath = null;
         }
 
         private static bool IsOpposite(GridPosition a, GridPosition b)
@@ -603,12 +678,9 @@ namespace SnakeGame.Core
                 Registry.Remove(SnakeId);
             }
 
-            if (grid && _isAlive)
+            if (_isAlive)
             {
-                foreach (var p in _bodyPositions)
-                {
-                    grid.ClearCell(p);
-                }
+                CleanupAndUnsubscribe();
             }
         }
     }

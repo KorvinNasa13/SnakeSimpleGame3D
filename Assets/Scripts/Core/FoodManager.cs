@@ -49,6 +49,8 @@ namespace SnakeGame.Core
 
         private float _nextNaturalSpawnTime;
 
+        private FoodTypeSo[] _cachedSpawnableTypes;
+
         private void Awake()
         {
             if (!sfxSource)
@@ -63,6 +65,21 @@ namespace SnakeGame.Core
             _grid = grid;
             _settings = cfg;
             _isInitialized = _grid && _settings;
+
+            if (_settings && _settings.AvailableFoodTypes != null)
+            {
+                var list = new List<FoodTypeSo>();
+
+                foreach (var t in _settings.AvailableFoodTypes)
+                {
+                    if (t && t.CanSpawnNaturally)
+                    {
+                        list.Add(t);
+                    }
+                }
+
+                _cachedSpawnableTypes = list.ToArray();
+            }
         }
 
         private void Start()
@@ -178,20 +195,12 @@ namespace SnakeGame.Core
 
         private void ForceSpawnFood()
         {
-            // Simple random pick from available types
-            if (_settings.AvailableFoodTypes == null || _settings.AvailableFoodTypes.Length == 0)
+            if (_cachedSpawnableTypes == null || _cachedSpawnableTypes.Length == 0)
             {
                 return;
             }
 
-            var pool = _settings.AvailableFoodTypes.Where(t => t && t.CanSpawnNaturally).ToArray();
-
-            if (pool.Length == 0)
-            {
-                return;
-            }
-
-            var type = pool[UnityEngine.Random.Range(0, pool.Length)];
+            var type = _cachedSpawnableTypes[UnityEngine.Random.Range(0, _cachedSpawnableTypes.Length)];
             var pos = GetRandomFreePosition();
 
             if (pos.HasValue)
@@ -273,7 +282,7 @@ namespace SnakeGame.Core
         {
             // 1. Unregister
             _activeFoods.Remove(food.Position);
-            _activeFoodList.Remove(food);
+            FastRemoveFood(food);
 
             // 2. Return Visual to Pool
             ReturnPooledVisual(food.Visual, food.Type.Prefab);
@@ -293,6 +302,25 @@ namespace SnakeGame.Core
             }
 
             OnFoodRemoved?.Invoke(food.Position, food.Type);
+        }
+
+        private void FastRemoveFood(ActiveFood food)
+        {
+            var index = _activeFoodList.IndexOf(food);
+
+            if (index < 0)
+            {
+                return;
+            }
+
+            var lastIndex = _activeFoodList.Count - 1;
+
+            if (index != lastIndex)
+            {
+                _activeFoodList[index] = _activeFoodList[lastIndex];
+            }
+
+            _activeFoodList.RemoveAt(lastIndex);
         }
 
         private void CheckLifetimeDespawn()
@@ -372,44 +400,43 @@ namespace SnakeGame.Core
         }
 
         // ----------------------------- Utils -----------------------------
-
         private FoodTypeSo PickRandomFoodType()
         {
-            // Weighted random selection
-            if (_settings.AvailableFoodTypes == null)
+            if (_cachedSpawnableTypes == null || _cachedSpawnableTypes.Length == 0)
             {
                 return null;
             }
 
             var totalWeight = 0f;
-            var candidates = new List<FoodTypeSo>();
 
-            foreach (var t in _settings.AvailableFoodTypes)
+            for (var i = 0; i < _cachedSpawnableTypes.Length; i++)
             {
-                if (!t || !t.CanSpawnNaturally)
-                {
-                    continue;
-                }
+                var t = _cachedSpawnableTypes[i];
 
-                // Check cooldown
                 if (_cooldowns.TryGetValue(t, out var unlockTime) && Time.time < unlockTime)
                 {
                     continue;
                 }
 
-                candidates.Add(t);
                 totalWeight += t.SpawnWeight;
             }
 
-            if (candidates.Count == 0)
+            if (totalWeight <= 0)
             {
                 return null;
             }
 
             var randomPoint = UnityEngine.Random.Range(0f, totalWeight);
 
-            foreach (var t in candidates)
+            for (var i = 0; i < _cachedSpawnableTypes.Length; i++)
             {
+                var t = _cachedSpawnableTypes[i];
+
+                if (_cooldowns.TryGetValue(t, out var unlockTime) && Time.time < unlockTime)
+                {
+                    continue;
+                }
+
                 if (randomPoint < t.SpawnWeight)
                 {
                     return t;
@@ -418,7 +445,7 @@ namespace SnakeGame.Core
                 randomPoint -= t.SpawnWeight;
             }
 
-            return candidates.Last();
+            return _cachedSpawnableTypes[_cachedSpawnableTypes.Length - 1];
         }
 
         private void ScheduleNextNaturalSpawn()

@@ -7,35 +7,35 @@ namespace SnakeGame.Core
 {
     public class GameController : MonoBehaviour
     {
-        [Header("Game Settings")] 
+        [Header("Game Settings")]
         [SerializeField]
         private GameSettingsSo gameSettings;
 
-        [Header("Managers (Assign in Inspector)")] 
+        [Header("Managers (Assign in Inspector)")]
         [SerializeField]
         private GridManager gridManager;
 
-        [SerializeField] 
+        [SerializeField]
         private FoodManager foodManager;
 
-        [Header("Snake Configurations")] 
+        [Header("Snake Configurations")]
         [SerializeField]
         private List<SnakeDataSo> snakeConfigs = new();
 
-        [Header("Runtime")] 
-        [SerializeField] 
+        [Header("Runtime")]
+        [SerializeField]
         private List<SnakeMovementController> activeSnakes = new();
 
-        [Header("Grid Visual Parent")] 
+        [Header("Grid Visual Parent")]
         [SerializeField]
         private Transform gridCellsParent;
 
-        [SerializeField] 
+        [SerializeField]
         private string gridCellsParentName = "CellHolder";
-        
-        [SerializeField] 
+
+        [SerializeField]
         private bool rebuildGridOnRestart = false;
-        
+
         private int _aliveSnakesCount;
 
         private void Awake()
@@ -57,6 +57,7 @@ namespace SnakeGame.Core
             if (!gridManager)
             {
                 gridManager = FindFirstObjectByType<GridManager>();
+
                 if (!gridManager)
                 {
                     Debug.LogWarning("[GameController] GridManager not found in scene — creating one.");
@@ -68,6 +69,7 @@ namespace SnakeGame.Core
             if (!foodManager)
             {
                 foodManager = FindFirstObjectByType<FoodManager>();
+
                 if (!foodManager)
                 {
                     Debug.LogWarning("[GameController] FoodManager not found in scene — creating one.");
@@ -79,31 +81,54 @@ namespace SnakeGame.Core
             if (!gameSettings)
             {
                 gameSettings = Resources.Load<GameSettingsSo>("GameSettings");
+
                 if (!gameSettings)
+                {
                     Debug.LogError("[GameController] GameSettings not assigned and not found in Resources!");
+                }
             }
 
             // Snakes
             if (snakeConfigs.Count == 0)
             {
                 var loaded = Resources.LoadAll<SnakeDataSo>("SnakeConfigs");
-                if (loaded != null && loaded.Length > 0) snakeConfigs.AddRange(loaded);
+
+                if (loaded != null && loaded.Length > 0)
+                {
+                    snakeConfigs.AddRange(loaded);
+                }
+
                 if (snakeConfigs.Count == 0)
+                {
                     Debug.LogError("[GameController] No snake configurations found!");
+                }
             }
         }
 
         private void InitializeManagers()
         {
-            if (!gameSettings) return;
+            if (!gameSettings)
+            {
+                return;
+            }
 
-            if (gridManager) gridManager.SetGameSettings(gameSettings);
-            if (foodManager) foodManager.Init(gridManager, gameSettings);
+            if (gridManager)
+            {
+                gridManager.SetGameSettings(gameSettings);
+            }
+
+            if (foodManager)
+            {
+                foodManager.Init(gridManager, gameSettings);
+            }
         }
 
         private void EnsureGridParent()
         {
-            if (!gridManager) return;
+            if (!gridManager)
+            {
+                return;
+            }
 
             if (!gridCellsParent)
             {
@@ -111,11 +136,11 @@ namespace SnakeGame.Core
                 var existing = GameObject.Find(string.IsNullOrWhiteSpace(gridCellsParentName)
                     ? "CellHolder"
                     : gridCellsParentName);
+
                 if (existing)
                 {
                     gridCellsParent = existing.transform;
-                }
-                else
+                } else
                 {
                     // Create new parent GameObject
                     var go = new GameObject(string.IsNullOrWhiteSpace(gridCellsParentName)
@@ -130,7 +155,10 @@ namespace SnakeGame.Core
 
         private void RebuildVisualGrid()
         {
-            if (!gridManager) return;
+            if (!gridManager)
+            {
+                return;
+            }
 
             gridManager.ClearDebugGrid();
             gridManager.BuildDebugGrid();
@@ -142,9 +170,10 @@ namespace SnakeGame.Core
             if (!gameSettings || snakeConfigs.Count == 0)
             {
                 Debug.LogError("[GameController] Cannot start game — missing settings or snake configs.");
+
                 return;
             }
-            
+
             SpawnSnakes();
             Debug.Log($"[GameController] Game started with {activeSnakes.Count} snakes.");
         }
@@ -159,6 +188,7 @@ namespace SnakeGame.Core
                 if (!cfg || !cfg.isDataValid())
                 {
                     Debug.LogWarning($"[GameController] Invalid snake config: {(cfg ? cfg.name : "null")}");
+
                     continue;
                 }
 
@@ -174,11 +204,9 @@ namespace SnakeGame.Core
             {
                 var spawnGridPos = gridManager.GetRandomEmptyPosition();
                 var worldPos = gridManager.GridToWorld(spawnGridPos);
-
                 var snakeGO = new GameObject($"Snake_{config.SnakeName}");
                 snakeGO.transform.SetParent(transform);
                 snakeGO.transform.SetPositionAndRotation(worldPos, Quaternion.identity);
-
                 var controller = snakeGO.AddComponent<SnakeMovementController>();
                 controller.SetSnakeData(config);
 
@@ -187,6 +215,7 @@ namespace SnakeGame.Core
 
                 // AI if needed
                 IControlledSnakeAI ai = null;
+
                 if (config.UseSnakeAI)
                 {
                     var simpleAi = snakeGO.AddComponent<SnakeSimpleAI>();
@@ -199,11 +228,9 @@ namespace SnakeGame.Core
                 // Subscriptions
                 controller.OnDeath += OnSnakeDeath;
                 controller.OnEatFood += OnSnakeEatFood;
-
                 activeSnakes.Add(controller);
                 Debug.Log($"[GameController] Spawned snake: {config.SnakeName} at {spawnGridPos}");
-            }
-            catch (System.Exception e)
+            } catch (System.Exception e)
             {
                 Debug.LogError($"[GameController] Failed to spawn snake {config.SnakeName}: {e.Message}");
             }
@@ -213,7 +240,11 @@ namespace SnakeGame.Core
         {
             _aliveSnakesCount--;
             Debug.Log($"[GameController] Snake died: {reason}. Alive: {_aliveSnakesCount}");
-            if (_aliveSnakesCount <= 0) GameOver();
+
+            if (_aliveSnakesCount <= 0)
+            {
+                GameOver();
+            }
         }
 
         private void OnSnakeEatFood(GridPosition position)
@@ -224,17 +255,22 @@ namespace SnakeGame.Core
         private void GameOver()
         {
             Debug.Log("[GameController] GAME OVER!");
-
             SnakeMovementController winner = null;
             var maxLen = 0;
+
             foreach (var s in activeSnakes)
+            {
                 if (s && s.IsAlive && s.Body.Count > maxLen)
                 {
                     maxLen = s.Body.Count;
                     winner = s;
                 }
+            }
 
-            if (winner) Debug.Log($"[GameController] Winner: {winner.SnakeId} with length {maxLen}");
+            if (winner)
+            {
+                Debug.Log($"[GameController] Winner: {winner.SnakeId} with length {maxLen}");
+            }
 
             Invoke(nameof(RestartGame), 3f);
         }
@@ -242,8 +278,14 @@ namespace SnakeGame.Core
         private void RestartGame()
         {
             foreach (var s in activeSnakes)
+            {
                 if (s)
+                {
+                    s.OnDeath -= OnSnakeDeath;
+                    s.OnEatFood -= OnSnakeEatFood;
                     Destroy(s.gameObject);
+                }
+            }
 
             activeSnakes.Clear();
 

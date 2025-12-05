@@ -6,7 +6,9 @@ using SnakeGame.Data;
 namespace SnakeGame.Core
 {
     public class GridManager : MonoBehaviour
-    {
+    {        
+        private const int MAX_SPAWN_ATTEMPTS = 50;
+        
         private enum CellKind
         {
             Face,
@@ -234,7 +236,7 @@ namespace SnakeGame.Core
             path = new List<GridPosition>();
     
             // Try random attempts to find a valid start + direction
-            for (int i = 0; i < 50; i++)
+            for (int i = 0; i < MAX_SPAWN_ATTEMPTS; i++)
             {
                 // 1. Pick random head
                 GridPosition headPos;
@@ -408,7 +410,11 @@ namespace SnakeGame.Core
         private void CreateCellGO(GameObject prefab, in GridPosition pos, float scale)
         {
             var go = Instantiate(prefab, GridToWorld(pos), Quaternion.identity, cellsParent);
+            
+#if UNITY_EDITOR
             go.name = $"C_{pos.X}_{pos.Y}_{pos.Z}";
+#endif
+            
             go.transform.localScale = Vector3.one * scale;
 
             // Optional: Set distinct material for edges
