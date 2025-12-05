@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using UnityEngine;
 using SnakeGame.Data;
 
@@ -15,80 +14,124 @@ namespace SnakeGame.Core
 
         private enum VisualMode
         {
+            GizmosOnly,
             Shell6Faces,
             FullVoxels
         }
-        
-        // ---------- Grid settings ----------
-        [Header("Grid (local or from SO)")] 
-        [SerializeField] 
+
+        [Header("Grid Configuration")]
+        [SerializeField]
         [Min(1)]
         private int gridSize = 20;
 
-        [SerializeField] 
-        [Min(0.01f)] 
+        [SerializeField]
+        [Min(0.01f)]
         private float cellSize = 1f;
 
-        [SerializeField] 
-        [Min(0f)] 
-        private float cellGap = 0f; // extra spacing between cell centers
-        
-        [SerializeField] 
+        [SerializeField]
+        [Min(0f)]
+        private float cellGap = 0f;
+
+        [SerializeField]
         private Vector3 gridOrigin = Vector3.zero;
-        
-        [Header("Debug / Visual (optional)")] [SerializeField]
+
+        [Header("Debug & Visualization")]
+        [SerializeField]
         private bool buildDebugGridOnStart = true;
 
-        [SerializeField] private VisualMode visualMode = VisualMode.Shell6Faces;
-        [SerializeField] private int visualizeZLayer = 0;
+        [SerializeField]
+        private VisualMode visualMode = VisualMode.GizmosOnly;
 
-        [Tooltip("Parent for all visual cells (set by GameController).")] [SerializeField]
+        [Tooltip("Parent for all visual cells.")]
+        [SerializeField]
         private Transform cellsParent;
 
-        [Tooltip("Optional prefab for a single cell (cube). If empty, a primitive Cube will be used.")] [SerializeField]
+        [SerializeField]
         private GameObject debugCellPrefab;
 
-        [Header("Materials (shared, no instancing)")]
-        [Tooltip("Shared material for face/inner cells (make it semi-transparent in the asset).")]
+        [Header("Materials")]
         [SerializeField]
         private Material cellMaterial;
 
-        [Tooltip("Shared material for only the 12 edges + 8 corners (make it distinct/opaque in the asset).")]
         [SerializeField]
         private Material edgeMaterial;
 
-        [Header("Gizmos")] 
-        [SerializeField] 
-        private bool drawGizmos = false;
-        
+        [Header("Gizmos")]
+        [SerializeField]
+        private bool drawGizmos = true;
+
+        [SerializeField]
+        private Color gizmoColor = new(0, 1, 0, 0.3f);
+
         public int GridSize => gridSize;
         public float CellSize => cellSize;
-        
-        private readonly Dictionary<GridPosition, CellData> _cells = new();
-        
+        public float TotalCellStep => cellSize + cellGap;
+
+        private CellData[] _cells;
+        private bool _isInitialized;
+
         private void Awake()
         {
-            _cells.Clear();
+            InitializeGridStorage();
         }
 
         private void Start()
         {
             if (buildDebugGridOnStart)
+            {
                 BuildDebugGrid();
+            }
+        }
+
+        private void InitializeGridStorage()
+        {
+            if (_isInitialized && _cells != null && _cells.Length == gridSize * gridSize * gridSize)
+            {
+                return;
+            }
+
+            var totalCells = gridSize * gridSize * gridSize;
+            _cells = new CellData[totalCells];
+
+            // Pre-allocate all cell objects to avoid runtime allocation
+            for (var x = 0; x < gridSize; x++)
+            for (var y = 0; y < gridSize; y++)
+            for (var z = 0; z < gridSize; z++)
+            {
+                var index = GetFlatIndex(x, y, z);
+                _cells[index] = new CellData(new GridPosition(x, y, z));
+            }
+
+            _isInitialized = true;
+            Debug.Log($"[GridManager] Initialized grid {gridSize}x{gridSize}x{gridSize} ({totalCells} cells).");
         }
 
         public void SetGameSettings(GameSettingsSo settings)
         {
             if (!settings)
             {
-                Debug.LogError("GridManager.SetGameSettings: settings is null");
+                Debug.LogError("[GridManager] Settings is null");
+
                 return;
             }
-            
-            gridSize = Mathf.Max(1, settings.GridSize);
+
+            // Only re-init if size changes to save performance
+            if (gridSize != settings.GridSize)
+            {
+                gridSize = Mathf.Max(1, settings.GridSize);
+                _cells = null;
+                _isInitialized = false;
+            }
+
             cellSize = Mathf.Max(0.01f, settings.CellSize);
 
-            _cells.Clear();
+            if (!_isInitialized)
+            {
+                InitializeGridStorage();
+            } else
+            {
+                ClearAllCells();
+            }
         }
 
         public void SetCellsParent(Transform parent)
@@ -96,197 +139,287 @@ namespace SnakeGame.Core
             cellsParent = parent;
         }
 
+        // ---------- Core Coordinate Logic (O(1)) ----------
         public bool IsValidPosition(in GridPosition pos)
         {
-            return pos.IsInBounds(gridSize);
+            return pos.X >= 0 && pos.X < gridSize && pos.Y >= 0 && pos.Y < gridSize && pos.Z >= 0 && pos.Z < gridSize;
         }
 
-        /// <summary>
-        /// Convert grid coords to world coords using (cellSize + cellGap) spacing and origin offset.
-        /// </summary>
+        private int GetFlatIndex(int x, int y, int z)
+        {
+            return x + y * gridSize + z * gridSize * gridSize;
+        }
+
         public Vector3 GridToWorld(in GridPosition pos)
         {
             var step = cellSize + cellGap;
+
             return gridOrigin + new Vector3(pos.X * step, pos.Y * step, pos.Z * step);
         }
 
+        // ---------- Cell State Management ----------
         public bool IsOccupied(in GridPosition pos)
         {
-            return _cells.TryGetValue(pos, out var c) && !c.IsEmpty;
+            if (!IsValidPosition(pos))
+            {
+                return true;
+            }
+
+            return !_cells[GetFlatIndex(pos.X, pos.Y, pos.Z)].IsEmpty;
         }
 
         public bool IsOccupiedByOtherSnake(in GridPosition pos, string snakeId)
         {
-            return _cells.TryGetValue(pos, out var cell) &&
-                   cell.State is CellState.SnakeBody or CellState.SnakeHead &&
-                   cell.OccupantId != snakeId;
+            if (!IsValidPosition(pos))
+            {
+                return false;
+            }
+
+            var cell = _cells[GetFlatIndex(pos.X, pos.Y, pos.Z)];
+
+            return (cell.State == CellState.SnakeBody || cell.State == CellState.SnakeHead)
+                && cell.OccupantId != snakeId;
         }
 
         public void SetCellOccupied(in GridPosition pos, string snakeId, bool isHead)
         {
-            var cell = GetOrCreateCell(pos);
-            cell.SetSnakeOccupied(snakeId, isHead);
+            if (!IsValidPosition(pos))
+            {
+                return;
+            }
+
+            _cells[GetFlatIndex(pos.X, pos.Y, pos.Z)].SetSnakeOccupied(snakeId, isHead);
         }
 
         public void ClearCell(in GridPosition pos)
         {
-            if (_cells.TryGetValue(pos, out var cell))
-                cell.Clear();
+            if (!IsValidPosition(pos))
+            {
+                return;
+            }
+
+            _cells[GetFlatIndex(pos.X, pos.Y, pos.Z)].Clear();
         }
 
-        public GridPosition GetRandomEmptyPosition(int maxAttempts = 128)
+        private void ClearAllCells()
         {
-            for (var i = 0; i < maxAttempts; i++)
+            if (_cells == null)
             {
-                var p = new GridPosition(UnityEngine.Random.Range(0, gridSize),
-                    UnityEngine.Random.Range(0, gridSize),
-                    UnityEngine.Random.Range(0, gridSize));
-                if (!IsOccupied(p)) return p;
+                return;
             }
 
-            for (var x = 0; x < gridSize; x++)
-            for (var y = 0; y < gridSize; y++)
-            for (var z = 0; z < gridSize; z++)
+            for (var i = 0; i < _cells.Length; i++)
             {
-                var p = new GridPosition(x, y, z);
-                if (!IsOccupied(p)) return p;
+                _cells[i].Clear();
             }
-
-            throw new InvalidOperationException("Grid is completely full – cannot find empty position.");
         }
 
         public CellData PeekCell(in GridPosition pos)
         {
-            _cells.TryGetValue(pos, out var cell);
-            return cell;
-        }
-
-        // ---------- Internal ----------
-        private CellData GetOrCreateCell(in GridPosition pos)
-        {
-            if (!_cells.TryGetValue(pos, out var cell))
+            if (!IsValidPosition(pos))
             {
-                cell = new CellData(pos);
-                _cells.Add(pos, cell);
+                return null;
             }
 
-            return cell;
+            return _cells[GetFlatIndex(pos.X, pos.Y, pos.Z)];
         }
 
-        // ---------- Visualization building ----------
+        // ---------- Optimized Random Selection ----------
+        /// <summary>
+        /// Finds an empty position efficiently.
+        /// Uses random sampling first, then falls back to linear scan if grid is crowded.
+        /// </summary>
+        public GridPosition GetRandomEmptyPosition(int maxRandomAttempts = 30)
+        {
+            if (!_isInitialized)
+            {
+                InitializeGridStorage();
+            }
+
+            // 1. Fast Path: Random sampling (O(1))
+            for (var i = 0; i < maxRandomAttempts; i++)
+            {
+                var randIndex = UnityEngine.Random.Range(0, _cells.Length);
+
+                if (_cells[randIndex].IsEmpty)
+                {
+                    return _cells[randIndex].Position;
+                }
+            }
+
+            // 2. Slow Path: Linear Scan (O(N))
+            // Guaranteed to find a spot if one exists.
+            // Start at random offset to avoid biasing towards (0,0,0)
+            var startOffset = UnityEngine.Random.Range(0, _cells.Length);
+
+            for (var i = 0; i < _cells.Length; i++)
+            {
+                var index = (startOffset + i) % _cells.Length;
+
+                if (_cells[index].IsEmpty)
+                {
+                    return _cells[index].Position;
+                }
+            }
+
+            throw new InvalidOperationException("[GridManager] Grid is completely full!");
+        }
+
+        // ---------- Visuals (Safety Checks Added) ----------
         public void BuildDebugGrid()
         {
             ClearDebugGrid();
 
-            // ensure parent
+            // Safety check: Don't spawn GameObjects for massive grids
+            if (visualMode == VisualMode.GizmosOnly || gridSize > 15)
+            {
+                if (gridSize > 15 && visualMode != VisualMode.GizmosOnly)
+                {
+                    Debug.LogWarning(
+                        "[GridManager] Grid is too large for GameObject visualization. Switching to Gizmos.");
+                }
+
+                return;
+            }
+
+            // Ensure parent
             if (!cellsParent)
             {
                 var holder = GameObject.Find("CellHolder");
                 cellsParent = holder ? holder.transform : new GameObject("CellHolder").transform;
             }
 
-            // resolve prefab
-            var prefab = debugCellPrefab;
-            GameObject temp = null;
-            if (!prefab)
-            {
-                temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                var col = temp.GetComponent<Collider>();
-                if (col)
-                {
-                    if (Application.isPlaying) Destroy(col);
-                    else DestroyImmediate(col);
-                }
+            // Resolve prefab
+            var prefabToUse = debugCellPrefab;
 
-                temp.name = "_DebugCellPrefab_TMP";
-                prefab = temp;
+            if (!prefabToUse)
+            {
+                prefabToUse = CreateTemporaryCubePrefab();
             }
 
-            // slightly smaller than the cell spacing to avoid z-fighting
-            var scale = Mathf.Max(0.01f, cellSize * 0.99f);
+            var scale = Mathf.Max(0.01f, cellSize * 0.95f); // 0.95 to show small gap visually
 
-            switch (visualMode)
+            for (var x = 0; x < gridSize; x++)
+            for (var y = 0; y < gridSize; y++)
+            for (var z = 0; z < gridSize; z++)
             {
-                case VisualMode.Shell6Faces:
+                // Skip inner cells if in Shell mode
+                if (visualMode == VisualMode.Shell6Faces)
                 {
-                    for (var x = 0; x < gridSize; x++)
-                    for (var y = 0; y < gridSize; y++)
-                    for (var z = 0; z < gridSize; z++)
+                    var isEdge = x == 0 || x == gridSize - 1 || y == 0 || y == gridSize - 1 || z == 0
+                        || z == gridSize - 1;
+
+                    if (!isEdge)
                     {
-                        // skip inner
-                        if (!(x == 0 || x == gridSize - 1 ||
-                              y == 0 || y == gridSize - 1 ||
-                              z == 0 || z == gridSize - 1))
-                            continue;
-
-                        // how many boundaries does this cell touch?
-                        var boundaries =
-                            (x == 0 || x == gridSize - 1 ? 1 : 0) +
-                            (y == 0 || y == gridSize - 1 ? 1 : 0) +
-                            (z == 0 || z == gridSize - 1 ? 1 : 0);
-
-                        var kind = boundaries >= 2 ? CellKind.Edge : CellKind.Face;
-                        CreateCellGO(prefab, new GridPosition(x, y, z), kind, scale);
+                        continue;
                     }
-
-                    break;
                 }
 
-                case VisualMode.FullVoxels:
-                {
-                    for (var x = 0; x < gridSize; x++)
-                    for (var y = 0; y < gridSize; y++)
-                    for (var z = 0; z < gridSize; z++)
-                    {
-                        var boundaries =
-                            (x == 0 || x == gridSize - 1 ? 1 : 0) +
-                            (y == 0 || y == gridSize - 1 ? 1 : 0) +
-                            (z == 0 || z == gridSize - 1 ? 1 : 0);
-
-                        var kind = boundaries >= 2 ? CellKind.Edge : CellKind.Face; // inner also treated as Face
-                        CreateCellGO(prefab, new GridPosition(x, y, z), kind, scale);
-                    }
-
-                    break;
-                }
+                var pos = new GridPosition(x, y, z);
+                CreateCellGO(prefabToUse, pos, scale);
             }
 
-            // cleanup temporary prefab
-            if (temp)
+            // Cleanup temp prefab
+            if (debugCellPrefab == null && prefabToUse != null)
             {
-                if (Application.isPlaying) Destroy(temp);
-                else DestroyImmediate(temp);
+                if (Application.isPlaying)
+                {
+                    Destroy(prefabToUse);
+                } else
+                {
+                    DestroyImmediate(prefabToUse);
+                }
+            }
+        }
+
+        private GameObject CreateTemporaryCubePrefab()
+        {
+            var temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
+
+            if (Application.isPlaying)
+            {
+                Destroy(temp.GetComponent<Collider>());
+            } else
+            {
+                DestroyImmediate(temp.GetComponent<Collider>());
+            }
+
+            temp.name = "_TempCell";
+
+            return temp;
+        }
+
+        private void CreateCellGO(GameObject prefab, in GridPosition pos, float scale)
+        {
+            var go = Instantiate(prefab, GridToWorld(pos), Quaternion.identity, cellsParent);
+            go.name = $"C_{pos.X}_{pos.Y}_{pos.Z}";
+            go.transform.localScale = Vector3.one * scale;
+
+            // Optional: Set distinct material for edges
+            var isOuterEdge = (pos.X == 0 || pos.X == gridSize - 1) && (pos.Y == 0 || pos.Y == gridSize - 1)
+                && (pos.Z == 0 || pos.Z == gridSize - 1);
+            var mr = go.GetComponentInChildren<MeshRenderer>();
+
+            if (mr)
+            {
+                if (isOuterEdge && edgeMaterial)
+                {
+                    mr.sharedMaterial = edgeMaterial;
+                } else if (cellMaterial)
+                {
+                    mr.sharedMaterial = cellMaterial;
+                }
             }
         }
 
         public void ClearDebugGrid()
         {
-            if (!cellsParent) return;
-            for (var i = cellsParent.childCount - 1; i >= 0; i--)
+            if (!cellsParent)
+            {
+                return;
+            }
+
+            var childCount = cellsParent.childCount;
+
+            for (var i = childCount - 1; i >= 0; i--)
             {
                 var c = cellsParent.GetChild(i);
-                if (Application.isPlaying) Destroy(c.gameObject);
-                else DestroyImmediate(c.gameObject);
+
+                if (Application.isPlaying)
+                {
+                    Destroy(c.gameObject);
+                } else
+                {
+                    DestroyImmediate(c.gameObject);
+                }
             }
         }
 
-        /// <summary>
-        /// Create visual cell and assign a shared material.
-        /// </summary>
-        private void CreateCellGO(GameObject prefab, in GridPosition pos, CellKind kind, float scale)
+        // ---------- Debug Gizmos (Efficient) ----------
+        private void OnDrawGizmos()
         {
-            var go = Instantiate(prefab, GridToWorld(pos), Quaternion.identity, cellsParent);
-            go.name = $"Cell_{pos.X}_{pos.Y}_{pos.Z}";
-            go.transform.localScale = new Vector3(scale, scale, scale);
+            if (!drawGizmos)
+            {
+                return;
+            }
 
-            var mr = go.GetComponentInChildren<MeshRenderer>();
-            if (!mr) return;
+            Gizmos.color = gizmoColor;
+            var totalSize = gridSize * (cellSize + cellGap);
+            var center = gridOrigin + Vector3.one * (totalSize * 0.5f - (cellSize + cellGap) * 0.5f);
+            Gizmos.DrawWireCube(center, Vector3.one * totalSize);
 
-            // Use shared materials only (no Instantiate).
-            if (kind == CellKind.Edge && edgeMaterial)
-                mr.sharedMaterial = edgeMaterial;
-            else if (cellMaterial)
-                mr.sharedMaterial = cellMaterial;
+            if (gridSize <= 10)
+            {
+                var drawSize = cellSize * 0.9f;
+
+                for (var x = 0; x < gridSize; x++)
+                for (var y = 0; y < gridSize; y++)
+                for (var z = 0; z < gridSize; z++)
+                {
+                    var pos = GridToWorld(new GridPosition(x, y, z));
+                    Gizmos.DrawWireCube(pos, Vector3.one * drawSize);
+                }
+            }
         }
     }
 }
